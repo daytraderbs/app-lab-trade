@@ -70,4 +70,4 @@ def risk_management(risk: RiskSchema, token: str = Depends(verify_subscriber)):
 
 if __name__== "__main__":
     import uvicorn
-    uvicorn.run("app.main:app, host="0.0.0.0", port=80, reload=false)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=80, reload=false)
