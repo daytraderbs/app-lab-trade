@@ -3,11 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 from typing import List, Dict
-from app.indicators import calculate_indicators
-from app.risk import calculate_position_size
-import os
-
-app = FastAPI(title="AI Trade Lab API - Secure Version", version="1.0.0")
+from indicators import calculate_indicators
+from risk import calculate_position_size
+from api import router
+app = FastAPI(title="Alerta Trade Lab API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
