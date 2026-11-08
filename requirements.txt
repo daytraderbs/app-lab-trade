@@ -1,0 +1,6 @@
+fastapi
+unicorn
+pydantic
+typing
+pandas
+numpy
