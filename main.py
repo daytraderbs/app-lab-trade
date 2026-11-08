@@ -6,7 +6,7 @@ from typing import List, Dict
 from indicators import calculate_indicators
 from risk import calculate_position_size
 import os
-
+app = FastAPI(title="AI Trade Lab API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
