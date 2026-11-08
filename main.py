@@ -5,8 +5,8 @@ from pydantic import BaseModel
 from typing import List, Dict
 from indicators import calculate_indicators
 from risk import calculate_position_size
-from api import router
-app = FastAPI(title="Alerta Trade Lab API")
+import os
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
