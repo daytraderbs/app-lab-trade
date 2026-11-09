@@ -4,3 +4,5 @@ pydantic
 typing
 pandas
 numpy
+requests
+iqoptionapi
