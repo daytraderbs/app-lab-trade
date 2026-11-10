@@ -16,7 +16,7 @@ app.add_middleware(
 )
 @app.get("/")
 def redirect_to_docs():
-    from fasttapi.responses import RedirectResponse
+    from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/docs")
 
 # 🔒 CAMADA DE SEGURANÇA: O sistema passa a exigir um Token de Assinante no cabeçalho
@@ -69,4 +69,4 @@ def risk_management(risk: RiskSchema, token: str = Depends(verify_subscriber)):
 
 if __name__== "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=80, reload=false)
+    uvicorn.run("main:app", host="0.0.0.0", port=80, reload=False)

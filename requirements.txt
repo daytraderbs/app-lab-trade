@@ -1,7 +1,6 @@
 fastapi
-unicorn
+uvicorn
 pydantic
-typing
 pandas
 numpy
 requests
