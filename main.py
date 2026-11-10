@@ -24,9 +24,11 @@ API_KEY_NAME = "X-Trader-Token"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
 # Token mestre temporário para testes (depois puxaremos dinamicamente do PostgreSQL)
-MASTER_SUBSCRIPTION_TOKEN = "aitradelab_demo_2026"
+MASTER_SUBSCRIPTION_TOKEN = os.environ.get("MASTER_SUBSCRIPTION_TOKEN")
 
 async def verify_subscriber(api_key: str = Depends(api_key_header)):
+    if not MASTER_SUBSCRIPTION_TOKEN:
+        raise HTTPException(status_code=500, detail="Token de segurança não configurado no servidor.")
     if not api_key or api_key != MASTER_SUBSCRIPTION_TOKEN:
         raise HTTPException(
             status_code=403, 
