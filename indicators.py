@@ -14,6 +14,7 @@ def calculate_indicators(candles: List[Dict]) -> Dict:
     low = df['low'].astype(float)
     
     results = {}
+    results['last_close'] = float(close.iloc[-1])
     
     # EMAs
     results['ema_9'] = close.ewm(span=9, adjust=False).mean().iloc[-1]
