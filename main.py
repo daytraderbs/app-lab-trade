@@ -123,15 +123,29 @@ def painel():
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI Trade Lab</title>
 <style>
-body{margin:0;background:#101827;color:#eef3ff;font-family:Arial,sans-serif;padding:20px}
-.container{max-width:1000px;margin:auto}
-h1{color:#50d6a0}
-.card{background:#1b293c;padding:20px;border-radius:12px;margin:12px 0}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
-.valor{font-size:25px;font-weight:bold;margin-top:10px}
-table{width:100%;border-collapse:collapse}
-td,th{padding:10px;border-bottom:1px solid #35445a;text-align:left}
-.menor{color:#aebbd0}
+*{box-sizing:border-box}
+body{margin:0;background:#080f1c;color:#e8eef8;font-family:Arial,sans-serif;padding:22px}
+.container{max-width:1200px;margin:auto}
+h1{color:#48e0ad;font-size:30px;margin-bottom:5px}
+h3{color:#dce7f5;margin-top:0}
+p.menor,.menor{color:#91a2b9}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:14px}
+.card{background:linear-gradient(145deg,#17263a,#101c2d);border:1px solid #263b53;padding:20px;border-radius:15px;margin:14px 0;box-shadow:0 8px 24px #0003}
+.valor{font-size:27px;font-weight:700;margin-top:12px;color:#fff}
+#sinal{color:#48e0ad}
+#conexao{color:#48e0ad;font-size:21px}
+table{width:100%;border-collapse:collapse;min-width:520px}
+td,th{padding:13px 10px;border-bottom:1px solid #293b50;text-align:left}
+th{color:#48e0ad;font-size:12px;text-transform:uppercase}
+td{font-size:14px}
+canvas{display:block;max-width:100%}
+#atualizacao{font-size:12px;text-align:center;margin-top:20px}
+@media(max-width:600px){
+ body{padding:13px}
+ h1{font-size:25px}
+ .card{padding:16px}
+ .valor{font-size:23px}
+}
 </style>
 </head>
 <body>
