@@ -161,6 +161,11 @@ canvas{display:block;max-width:100%}
 <div class="card">ACERTOS / ERROS<div class="valor" id="resultado">0 / 0</div></div>
 <div class="card">CONEXÃO DO ROBÔ<div class="valor" id="conexao">AGUARDANDO</div></div>
 </div>
+<div class="grid">
+<div class="card">RSI 14<div class="valor" id="rsi">--</div></div>
+<div class="card">MACD<div class="valor" id="macd">--</div></div>
+<div class="card">ATR 14<div class="valor" id="atr">--</div></div>
+</div>
 <div class="card">
 <h3>Último sinal</h3>
 <div id="detalhe" class="menor">Aguardando sincronização do monitor.</div>
@@ -305,6 +310,9 @@ async function atualizar(){
   document.getElementById('taxa').textContent=(s.taxa_acerto??0)+'%';
   document.getElementById('avaliadas').textContent=s.avaliadas??0;
   document.getElementById('resultado').textContent=(s.acertos??0)+' / '+(s.erros??0);
+  document.getElementById("rsi").textContent=x.rsi_14!=null?Number(x.rsi_14).toFixed(2):"--";
+  document.getElementById("macd").textContent=x.macd_histogram!=null?Number(x.macd_histogram).toFixed(6):"--";
+  document.getElementById("atr").textContent=x.atr_14!=null?Number(x.atr_14).toFixed(6):"--";
   document.getElementById('detalhe').textContent=x.data_hora
    ? 'Horário de Brasília: '+horarioBR(x.data_hora)+' | Preço: '+(x.preco??'--')+' | Score: '+(x.score??'--')
    : 'Aguardando sincronização do monitor.';
