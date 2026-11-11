@@ -1,3 +1,4 @@
+from fastapi.responses import HTMLResponse
 from fastapi import FastAPI, HTTPException, Security, Depends 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
@@ -70,6 +71,123 @@ def risk_management(risk: RiskSchema, token: str = Depends(verify_subscriber)):
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
+
+
+# Estado recebido do monitor PRACTICE
+monitor_state = {
+    "updated_at": None,
+    "latest": None,
+    "history": [],
+    "stats": {}
+}
+
+@app.post("/api/v1/monitor/update")
+def update_monitor(data: Dict, token: str = Depends(verify_subscriber)):
+    from datetime import datetime, timezone
+
+    if not isinstance(data.get("latest"), dict):
+        raise HTTPException(status_code=400, detail="Sinal atual inválido.")
+
+    if not isinstance(data.get("history", []), list):
+        raise HTTPException(status_code=400, detail="Histórico inválido.")
+
+    if not isinstance(data.get("stats", {}), dict):
+        raise HTTPException(status_code=400, detail="Estatísticas inválidas.")
+
+    monitor_state["latest"] = data["latest"]
+    monitor_state["history"] = data.get("history", [])[-300:]
+    monitor_state["stats"] = data.get("stats", {})
+    monitor_state["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    return {"status": "recebido", "updated_at": monitor_state["updated_at"]}
+
+
+@app.get("/api/v1/monitor/state")
+def get_monitor_state(token: str = Depends(verify_subscriber)):
+    return monitor_state.copy()
+
+
+
+@app.get("/api/v1/monitor/public-state")
+def public_monitor_state():
+    return monitor_state.copy()
+
+
+@app.get("/painel", response_class=HTMLResponse)
+def painel():
+    return """
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Trade Lab</title>
+<style>
+body{margin:0;background:#101827;color:#eef3ff;font-family:Arial,sans-serif;padding:20px}
+.container{max-width:1000px;margin:auto}
+h1{color:#50d6a0}
+.card{background:#1b293c;padding:20px;border-radius:12px;margin:12px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+.valor{font-size:25px;font-weight:bold;margin-top:10px}
+table{width:100%;border-collapse:collapse}
+td,th{padding:10px;border-bottom:1px solid #35445a;text-align:left}
+.menor{color:#aebbd0}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>AI Trade Lab</h1>
+<p class="menor">Monitor de mercado • EUR/USD • M15 • Conta PRACTICE</p>
+<div class="grid">
+<div class="card">SINAL ATUAL<div class="valor" id="sinal">Aguardando dados</div></div>
+<div class="card">TAXA DE ACERTO<div class="valor" id="taxa">--</div></div>
+<div class="card">AVALIADAS<div class="valor" id="avaliadas">0</div></div>
+<div class="card">ACERTOS / ERROS<div class="valor" id="resultado">0 / 0</div></div>
+</div>
+<div class="card">
+<h3>Último sinal</h3>
+<div id="detalhe" class="menor">Aguardando sincronização do monitor.</div>
+</div>
+<div class="card">
+<h3>Histórico recente</h3>
+<div style="overflow-x:auto">
+<table><thead><tr><th>Horário</th><th>Sinal</th><th>Score</th><th>Status</th><th>Resultado</th></tr></thead>
+<tbody id="historico"><tr><td colspan="5">Sem dados.</td></tr></tbody></table>
+</div>
+</div>
+<p class="menor" id="atualizacao">Aguardando atualização...</p>
+</div>
+<script>
+async function atualizar(){
+ try{
+  const r=await fetch('/api/v1/monitor/public-state');
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  const d=await r.json();
+  const x=d.latest||{},s=d.stats||{};
+  document.getElementById('sinal').textContent=x.sinal||'AGUARDAR';
+  document.getElementById('taxa').textContent=(s.taxa_acerto??0)+'%';
+  document.getElementById('avaliadas').textContent=s.avaliadas??0;
+  document.getElementById('resultado').textContent=(s.acertos??0)+' / '+(s.erros??0);
+  document.getElementById('detalhe').textContent=x.data_hora
+   ? 'Horário: '+x.data_hora+' | Preço: '+(x.preco??'--')+' | Score: '+(x.score??'--')
+   : 'Aguardando sincronização do monitor.';
+  const linhas=(d.history||[]).slice().reverse().slice(0,30);
+  document.getElementById('historico').innerHTML=linhas.length?linhas.map(v=>
+   '<tr><td>'+(v.data_hora||'--')+'</td><td>'+(v.sinal||'--')+'</td><td>'+(v.score??'--')+'</td><td>'+(v.status||'--')+'</td><td>'+(v.resultado||'--')+'</td></tr>'
+  ).join(''):'<tr><td colspan="5">Sem dados.</td></tr>';
+  document.getElementById('atualizacao').textContent='Última sincronização: '+(d.updated_at||'Ainda não recebida');
+ }catch(e){
+  document.getElementById('atualizacao').textContent='Erro ao atualizar: '+e.message;
+ }
+}
+atualizar();
+setInterval(atualizar,15000);
+</script>
+</body>
+</html>
+"""
+
+
 
 if __name__== "__main__":
     import uvicorn
