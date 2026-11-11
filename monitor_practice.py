@@ -211,7 +211,7 @@ def mostrar_estatisticas(rows):
 
 
 
-def enviar_estado_render(rows):
+def enviar_estado_render(rows, candles):
     if not TOKEN_SEGURANCA or not rows:
         return
 
@@ -228,6 +228,7 @@ def enviar_estado_render(rows):
     payload = {
         "latest": rows[-1],
         "history": rows[-300:],
+        "candles": [formatar_candle(c) for c in candles[-205:]],
         "stats": {
             "avaliadas": len(finalizados),
             "acertos": acertos,
@@ -357,7 +358,7 @@ def executar():
             if alterado:
                 salvar_historico(rows)
 
-            enviar_estado_render(rows)
+            enviar_estado_render(rows, fechados)
             mostrar_estatisticas(rows)
             time.sleep(10)
 

@@ -78,6 +78,7 @@ monitor_state = {
     "updated_at": None,
     "latest": None,
     "history": [],
+    "candles": [],
     "stats": {}
 }
 
@@ -96,6 +97,7 @@ def update_monitor(data: Dict, token: str = Depends(verify_subscriber)):
 
     monitor_state["latest"] = data["latest"]
     monitor_state["history"] = data.get("history", [])[-300:]
+    monitor_state["candles"] = data.get("candles", [])[-205:]
     monitor_state["stats"] = data.get("stats", {})
     monitor_state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -164,7 +166,7 @@ canvas{display:block;max-width:100%}
 <div id="detalhe" class="menor">Aguardando sincronização do monitor.</div>
 </div>
 <div class="card">
-<h3>Evolução dos sinais</h3>
+<h3>Gráfico EUR/USD · M15</h3>
 <canvas id="grafico" height="180" style="width:100%"></canvas>
 </div>
 <div class="card">
@@ -186,36 +188,110 @@ function horarioBR(data){
   timeStyle:"medium"
  }).format(d);
 }
-function desenharGrafico(linhas){
+function desenharGrafico(candles){
  const c=document.getElementById("grafico");
  const ctx=c.getContext("2d");
  const w=c.clientWidth;
- const h=180;
- c.width=w*devicePixelRatio;
- c.height=h*devicePixelRatio;
- ctx.scale(devicePixelRatio,devicePixelRatio);
+ const h=280;
+ const ratio=window.devicePixelRatio||1;
+ c.width=w*ratio;
+ c.height=h*ratio;
+ ctx.scale(ratio,ratio);
  ctx.clearRect(0,0,w,h);
- const dados=linhas.slice().reverse();
- if(!dados.length){
-  ctx.fillText("Aguardando sinais...",12,30);
+
+ if(!candles||candles.length<2){
+  ctx.fillStyle="#91a2b9";
+  ctx.fillText("Aguardando candles da IQ Option...",12,30);
   return;
  }
- const valores=dados.map(v=>Number(v.score)||0);
- const max=Math.max(3,...valores.map(Math.abs));
- const meio=h/2;
- ctx.beginPath();
- ctx.moveTo(0,meio);
- ctx.lineTo(w,meio);
- ctx.stroke();
- ctx.beginPath();
- valores.forEach((v,i)=>{
-  const x=valores.length===1?w/2:i*w/(valores.length-1);
-  const y=meio-(v/max)*(h/2-15);
-  if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+
+ function calcularEMA(periodo){
+  const alpha=2/(periodo+1);
+  let ema=Number(candles[0].close);
+  return candles.map((v,i)=>{
+   const preco=Number(v.close);
+   if(i===0)return ema;
+   ema=preco*alpha+ema*(1-alpha);
+   return ema;
+  });
+ }
+
+ const e9=calcularEMA(9);
+ const e21=calcularEMA(21);
+ const e200=calcularEMA(200);
+ const inicio=Math.max(0,candles.length-100);
+ const dados=candles.slice(inicio);
+ const valores=dados.flatMap(v=>[
+  Number(v.high),Number(v.low)
+ ]);
+ [e9,e21,e200].forEach(a=>valores.push(...a.slice(inicio)));
+ const min=Math.min(...valores);
+ const max=Math.max(...valores);
+ const margem=(max-min)*0.10||0.0001;
+ const topo=min-margem;
+ const fundo=max+margem;
+ const esquerda=12, direita=65, acima=15, abaixo=22;
+ const largura=w-esquerda-direita;
+ const altura=h-acima-abaixo;
+ const y=v=>acima+(fundo-v)/(fundo-topo)*altura;
+
+ ctx.font="11px Arial";
+ ctx.strokeStyle="#293b50";
+ ctx.fillStyle="#91a2b9";
+ for(let i=0;i<=4;i++){
+  const valor=fundo-(fundo-topo)*i/4;
+  const yy=acima+altura*i/4;
+  ctx.beginPath();
+  ctx.moveTo(esquerda,yy);
+  ctx.lineTo(w-direita,yy);
+  ctx.stroke();
+  ctx.fillText(valor.toFixed(5),w-direita+5,yy+4);
+ }
+
+ const passo=largura/dados.length;
+ const corpo=Math.max(2,Math.min(9,passo*0.65));
+
+ dados.forEach((v,j)=>{
+  const x=esquerda+passo*(j+0.5);
+  const abertura=Number(v.open);
+  const fechamento=Number(v.close);
+  const alta=fechamento>=abertura;
+  const cor=alta?"#20c997":"#ff5c70";
+  ctx.strokeStyle=cor;
+  ctx.fillStyle=cor;
+  ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(x,y(Number(v.high)));
+  ctx.lineTo(x,y(Number(v.low)));
+  ctx.stroke();
+  const y1=y(Math.max(abertura,fechamento));
+  const y2=y(Math.min(abertura,fechamento));
+  ctx.fillRect(x-corpo/2,y1,corpo,Math.max(1,y2-y1));
  });
- ctx.lineWidth=2;
- ctx.stroke();
+
+ function linhaEMA(valoresEMA,cor){
+  ctx.beginPath();
+  ctx.strokeStyle=cor;
+  ctx.lineWidth=1.7;
+  valoresEMA.slice(inicio).forEach((v,j)=>{
+   const x=esquerda+passo*(j+0.5);
+   if(j===0)ctx.moveTo(x,y(v));
+   else ctx.lineTo(x,y(v));
+  });
+  ctx.stroke();
+ }
+ linhaEMA(e9,"#f5c451");
+ linhaEMA(e21,"#45a9ff");
+ linhaEMA(e200,"#c58aff");
+
+ ctx.fillStyle="#f5c451";
+ ctx.fillText("EMA 9",12,h-5);
+ ctx.fillStyle="#45a9ff";
+ ctx.fillText("EMA 21",75,h-5);
+ ctx.fillStyle="#c58aff";
+ ctx.fillText("EMA 200",145,h-5);
 }
+
 async function atualizar(){
  try{
   const r=await fetch('/api/v1/monitor/public-state');
@@ -233,7 +309,7 @@ async function atualizar(){
    ? 'Horário de Brasília: '+horarioBR(x.data_hora)+' | Preço: '+(x.preco??'--')+' | Score: '+(x.score??'--')
    : 'Aguardando sincronização do monitor.';
   const linhas=(d.history||[]).slice().reverse().slice(0,30);
-  desenharGrafico(linhas);
+  desenharGrafico(d.candles||[]);
   document.getElementById('historico').innerHTML=linhas.length?linhas.map(v=>
    '<tr><td>'+horarioBR(v.data_hora)+'</td><td>'+(v.sinal||'--')+'</td><td>'+(v.score??'--')+'</td><td>'+(v.status||'--')+'</td><td>'+(v.resultado||'--')+'</td></tr>'
   ).join(''):'<tr><td colspan="5">Sem dados.</td></tr>';
