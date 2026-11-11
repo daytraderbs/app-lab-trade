@@ -358,7 +358,13 @@ def executar():
             if alterado:
                 salvar_historico(rows)
 
-            enviar_estado_render(rows, fechados)
+            em_formacao = sorted(
+                [c for c in (candles or [])
+                 if float(c["to"]) > time.time() - 1],
+                key=lambda c: float(c["from"])
+            )
+            candles_painel = fechados[-204:] + em_formacao[-1:]
+            enviar_estado_render(rows, candles_painel)
             mostrar_estatisticas(rows)
             time.sleep(10)
 
