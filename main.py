@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import List, Dict
 from indicators import calculate_indicators
 from risk import calculate_position_size
+from strategy import generate_signal
 import os
 app = FastAPI(title="AI Trade Lab API")
 app.add_middleware(
@@ -59,7 +60,8 @@ def analyze_market(data: CandleData, token: str = Depends(verify_subscriber)):
     if "error" in metrics:
         raise HTTPException(status_code=400, detail=metrics["error"])
         
-    return {"pair": "EURUSD", "timeframe": "15m", "indicators": metrics}
+    decision = generate_signal(metrics)
+    return {"pair": "EURUSD", "timeframe": "15m", "indicators": metrics, "decision": decision}
 
 # 🔐 Rota protegida: Só calcula a gestão de risco se for assinante ativo
 @app.post("/api/v1/risk-management")
