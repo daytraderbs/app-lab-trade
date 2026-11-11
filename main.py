@@ -143,10 +143,15 @@ td,th{padding:10px;border-bottom:1px solid #35445a;text-align:left}
 <div class="card">TAXA DE ACERTO<div class="valor" id="taxa">--</div></div>
 <div class="card">AVALIADAS<div class="valor" id="avaliadas">0</div></div>
 <div class="card">ACERTOS / ERROS<div class="valor" id="resultado">0 / 0</div></div>
+<div class="card">CONEXÃO DO ROBÔ<div class="valor" id="conexao">AGUARDANDO</div></div>
 </div>
 <div class="card">
 <h3>Último sinal</h3>
 <div id="detalhe" class="menor">Aguardando sincronização do monitor.</div>
+</div>
+<div class="card">
+<h3>Evolução dos sinais</h3>
+<canvas id="grafico" height="180" style="width:100%"></canvas>
 </div>
 <div class="card">
 <h3>Histórico recente</h3>
@@ -158,24 +163,67 @@ td,th{padding:10px;border-bottom:1px solid #35445a;text-align:left}
 <p class="menor" id="atualizacao">Aguardando atualização...</p>
 </div>
 <script>
+function horarioBR(data){
+ if(!data) return "--";
+ const d=new Date(data);
+ return isNaN(d)?"--":new Intl.DateTimeFormat("pt-BR",{
+  timeZone:"America/Sao_Paulo",
+  dateStyle:"short",
+  timeStyle:"medium"
+ }).format(d);
+}
+function desenharGrafico(linhas){
+ const c=document.getElementById("grafico");
+ const ctx=c.getContext("2d");
+ const w=c.clientWidth;
+ const h=180;
+ c.width=w*devicePixelRatio;
+ c.height=h*devicePixelRatio;
+ ctx.scale(devicePixelRatio,devicePixelRatio);
+ ctx.clearRect(0,0,w,h);
+ const dados=linhas.slice().reverse();
+ if(!dados.length){
+  ctx.fillText("Aguardando sinais...",12,30);
+  return;
+ }
+ const valores=dados.map(v=>Number(v.score)||0);
+ const max=Math.max(3,...valores.map(Math.abs));
+ const meio=h/2;
+ ctx.beginPath();
+ ctx.moveTo(0,meio);
+ ctx.lineTo(w,meio);
+ ctx.stroke();
+ ctx.beginPath();
+ valores.forEach((v,i)=>{
+  const x=valores.length===1?w/2:i*w/(valores.length-1);
+  const y=meio-(v/max)*(h/2-15);
+  if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+ });
+ ctx.lineWidth=2;
+ ctx.stroke();
+}
 async function atualizar(){
  try{
   const r=await fetch('/api/v1/monitor/public-state');
   if(!r.ok) throw new Error('HTTP '+r.status);
   const d=await r.json();
   const x=d.latest||{},s=d.stats||{};
+  const ultima=d.updated_at?new Date(d.updated_at).getTime():0;
+  const online=ultima>0&&(Date.now()-ultima)<1200000;
+  document.getElementById("conexao").textContent=online?"ONLINE":"SEM COMUNICAÇÃO";
   document.getElementById('sinal').textContent=x.sinal||'AGUARDAR';
   document.getElementById('taxa').textContent=(s.taxa_acerto??0)+'%';
   document.getElementById('avaliadas').textContent=s.avaliadas??0;
   document.getElementById('resultado').textContent=(s.acertos??0)+' / '+(s.erros??0);
   document.getElementById('detalhe').textContent=x.data_hora
-   ? 'Horário: '+x.data_hora+' | Preço: '+(x.preco??'--')+' | Score: '+(x.score??'--')
+   ? 'Horário de Brasília: '+horarioBR(x.data_hora)+' | Preço: '+(x.preco??'--')+' | Score: '+(x.score??'--')
    : 'Aguardando sincronização do monitor.';
   const linhas=(d.history||[]).slice().reverse().slice(0,30);
+  desenharGrafico(linhas);
   document.getElementById('historico').innerHTML=linhas.length?linhas.map(v=>
-   '<tr><td>'+(v.data_hora||'--')+'</td><td>'+(v.sinal||'--')+'</td><td>'+(v.score??'--')+'</td><td>'+(v.status||'--')+'</td><td>'+(v.resultado||'--')+'</td></tr>'
+   '<tr><td>'+horarioBR(v.data_hora)+'</td><td>'+(v.sinal||'--')+'</td><td>'+(v.score??'--')+'</td><td>'+(v.status||'--')+'</td><td>'+(v.resultado||'--')+'</td></tr>'
   ).join(''):'<tr><td colspan="5">Sem dados.</td></tr>';
-  document.getElementById('atualizacao').textContent='Última sincronização: '+(d.updated_at||'Ainda não recebida');
+  document.getElementById('atualizacao').textContent='Última sincronização: '+horarioBR(d.updated_at);
  }catch(e){
   document.getElementById('atualizacao').textContent='Erro ao atualizar: '+e.message;
  }
