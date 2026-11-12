@@ -13,7 +13,7 @@ IQ_USER = os.environ["IQ_USER"]
 IQ_PASS = os.environ["IQ_PASS"]
 
 ATIVO = "EURUSD"
-TIMEFRAME = 900
+TIMEFRAME = 60
 CANDLES_COUNT = 205
 CONTA = "PRACTICE"
 
@@ -238,7 +238,7 @@ def enviar_estado_render(rows, candles):
             "taxa_acerto": round(acertos / total * 100, 2) if total else 0
         },
         "pair": ATIVO,
-        "timeframe": "15m",
+        "timeframe": "1m",
         "source": "monitor_practice"
     }
 

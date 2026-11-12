@@ -130,7 +130,7 @@ def analyze_market(data: CandleData, token: str = Depends(verify_subscriber)):
         raise HTTPException(status_code=400, detail=metrics["error"])
         
     decision = generate_signal(metrics)
-    return {"pair": "EURUSD", "timeframe": "15m", "indicators": metrics, "decision": decision}
+    return {"pair": "EURUSD", "timeframe": "1m", "indicators": metrics, "decision": decision}
 
 # 🔐 Rota protegida: Só calcula a gestão de risco se for assinante ativo
 @app.post("/api/v1/risk-management")
