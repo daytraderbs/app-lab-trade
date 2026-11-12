@@ -327,7 +327,7 @@ async function atualizar(){
  }
 }
 atualizar();
-setInterval(atualizar,15000);
+setInterval(atualizar,2000);
 </script>
 </body>
 </html>
