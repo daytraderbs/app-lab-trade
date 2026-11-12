@@ -19,6 +19,9 @@ CONTA = "PRACTICE"
 
 ARQUIVO = Path("monitor_practice.csv")
 RENDER_URL = "https://app-lab-trade-1.onrender.com/api/v1/monitor/update"
+COMMANDS_URL = "https://app-lab-trade-1.onrender.com/api/v1/monitor/commands"
+COMMAND_RESULT_URL = "https://app-lab-trade-1.onrender.com/api/v1/monitor/command-result"
+ACCOUNT_STATE_URL = "https://app-lab-trade-1.onrender.com/api/v1/monitor/account-state"
 TOKEN_SEGURANCA = os.environ.get("TOKEN_SEGURANCA")
 
 COLUNAS = [
@@ -256,8 +259,117 @@ def enviar_estado_render(rows, candles):
         print(f"Falha ao sincronizar com Render: {erro}")
 
 
+
+ultimo_comando_processado = None
+resultado_pendente = None
+
+
+def processar_comando_conta(api):
+    global ultimo_comando_processado, resultado_pendente
+
+    if not TOKEN_SEGURANCA:
+        return
+
+    headers = {"X-Trader-Token": TOKEN_SEGURANCA}
+
+    if resultado_pendente:
+        try:
+            r = requests.post(
+                COMMAND_RESULT_URL,
+                json=resultado_pendente,
+                headers=headers,
+                timeout=15
+            )
+            if r.status_code == 409:
+                print("Comando expirado ou já encerrado no Render.")
+                resultado_pendente = None
+            else:
+                r.raise_for_status()
+                print("Resultado da troca de conta confirmado no Render.")
+                resultado_pendente = None
+        except requests.RequestException:
+            print("Resultado pendente: tentando reenviar.")
+        return
+
+    try:
+        r = requests.get(COMMANDS_URL, headers=headers, timeout=10)
+        r.raise_for_status()
+        comando = r.json().get("command")
+
+        if not comando:
+            return
+
+        command_id = comando.get("command_id")
+        conta = comando.get("account")
+
+        if not command_id or command_id == ultimo_comando_processado:
+            return
+
+        ultimo_comando_processado = command_id
+
+        sucesso = False
+        mensagem = ""
+
+        try:
+            criado = float(comando.get("created_at", 0))
+
+            if time.time() - criado > 60 or criado > time.time() + 5:
+                raise RuntimeError("Comando expirado.")
+
+            if conta not in ("PRACTICE", "REAL"):
+                raise RuntimeError("Conta solicitada inválida.")
+
+            print(f"Solicitação de troca para {conta} recebida.")
+            api.change_balance(conta)
+            time.sleep(2)
+
+            confirmada = api.get_balance_mode()
+            sucesso = confirmada == conta
+
+            mensagem = (
+                f"Conta {conta} confirmada pela IQ Option."
+                if sucesso else
+                f"Falha na confirmação. IQ Option retornou: {confirmada!r}"
+            )
+
+        except Exception as erro:
+            mensagem = str(erro)
+
+        resultado_pendente = {
+            "command_id": command_id,
+            "success": sucesso,
+            "account": conta,
+            "message": mensagem
+        }
+
+        print(mensagem)
+
+    except requests.RequestException as erro:
+        print(f"Falha ao consultar comandos do Render: {erro}")
+
+
+def sincronizar_estado_conta(api):
+    if not TOKEN_SEGURANCA:
+        print("Token ausente: estado da conta não sincronizado.")
+        return
+
+    conta = api.get_balance_mode()
+    if conta not in ("PRACTICE", "REAL"):
+        raise RuntimeError("IQ Option retornou modalidade inválida.")
+
+    resposta = requests.post(
+        ACCOUNT_STATE_URL,
+        json={"account": conta},
+        headers={"X-Trader-Token": TOKEN_SEGURANCA},
+        timeout=15
+    )
+    resposta.raise_for_status()
+    print(f"Conta {conta} sincronizada com o painel.")
+
+
 def executar():
     api = conectar()
+    sincronizar_estado_conta(api)
     rows = carregar_historico()
     registrados = {int(r["timestamp"]) for r in rows}
 
@@ -269,6 +381,7 @@ def executar():
 
     while True:
         try:
+            processar_comando_conta(api)
             agora = time.time()
 
             candles = api.get_candles(

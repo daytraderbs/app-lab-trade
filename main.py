@@ -141,6 +141,123 @@ def risk_management(risk: RiskSchema, token: str = Depends(verify_subscriber)):
     return result
 
 
+
+# CONTROLE SEGURO DE SELECAO DE CONTA
+class AccountSelection(BaseModel):
+    account: str
+    confirm_real: bool = False
+
+class AccountCommandResult(BaseModel):
+    command_id: str
+    success: bool
+    account: str
+    message: str = ""
+
+pending_account_command = None
+account_status = {
+    "requested": "PRACTICE",
+    "confirmed": None,
+    "status": "AGUARDANDO_MONITOR",
+    "message": "Aguardando confirmação da IQ Option."
+}
+
+def limpar_comando_expirado():
+    global pending_account_command
+
+    if pending_account_command is None:
+        return
+
+    idade = time.time() - pending_account_command["created_at"]
+
+    if idade > 60:
+        conta = pending_account_command["account"]
+        pending_account_command = None
+        account_status.update({
+            "status": "EXPIRADO",
+            "message": f"Solicitação de {conta} expirou. Tente novamente."
+        })
+
+
+@app.post("/api/v1/account/select")
+def select_account(data: AccountSelection, request: Request):
+    global pending_account_command
+
+    if not validar_sessao(request):
+        raise HTTPException(status_code=401, detail="Login necessário.")
+
+    if data.account not in ("PRACTICE", "REAL"):
+        raise HTTPException(status_code=400, detail="Conta inválida.")
+
+    if data.account == "REAL" and data.confirm_real is not True:
+        raise HTTPException(status_code=403, detail="Confirmação explícita de REAL necessária.")
+
+    limpar_comando_expirado()
+
+    if pending_account_command is not None:
+        raise HTTPException(status_code=409, detail="Já existe uma troca pendente.")
+
+    pending_account_command = {
+        "command_id": secrets.token_urlsafe(24),
+        "account": data.account,
+        "created_at": time.time()
+    }
+
+    account_status.update({
+        "requested": data.account,
+        "status": "PENDENTE",
+        "message": "Aguardando confirmação da IQ Option."
+    })
+
+    return {"status": "PENDENTE", "command_id": pending_account_command["command_id"]}
+
+
+@app.get("/api/v1/monitor/commands")
+def get_monitor_commands(token: str = Depends(verify_subscriber)):
+    limpar_comando_expirado()
+    return {"command": pending_account_command}
+
+
+@app.post("/api/v1/monitor/command-result")
+def receive_command_result(data: AccountCommandResult, token: str = Depends(verify_subscriber)):
+    global pending_account_command
+
+    if not pending_account_command or data.command_id != pending_account_command["command_id"]:
+        raise HTTPException(status_code=409, detail="Comando inexistente ou já processado.")
+
+    if data.account != pending_account_command["account"]:
+        raise HTTPException(status_code=400, detail="Conta retornada não corresponde à solicitada.")
+
+    account_status.update({
+        "requested": data.account,
+        "confirmed": data.account if data.success else account_status["confirmed"],
+        "status": "CONFIRMADA" if data.success else "FALHA",
+        "message": data.message
+    })
+
+    pending_account_command = None
+
+    return {"status": "recebido"}
+
+
+
+@app.post("/api/v1/monitor/account-state")
+def receive_account_state(data: Dict, token: str = Depends(verify_subscriber)):
+    conta = data.get("account")
+    if conta != "PRACTICE":
+        raise HTTPException(
+            status_code=403,
+            detail="Sincronização inicial permitida somente em PRACTICE."
+        )
+
+    account_status.update({
+        "requested": conta,
+        "confirmed": conta,
+        "status": "CONFIRMADA",
+        "message": f"Conta {conta} confirmada pela IQ Option."
+    })
+    return {"status": "recebido"}
+
+
 # Estado recebido do monitor PRACTICE
 monitor_state = {
     "updated_at": None,
@@ -182,7 +299,9 @@ def get_monitor_state(token: str = Depends(verify_subscriber)):
 def public_monitor_state(request: Request):
     if not validar_sessao(request):
         raise HTTPException(status_code=401, detail="Login administrativo necessário.")
-    return monitor_state.copy()
+    estado = monitor_state.copy()
+    estado["account"] = account_status.copy()
+    return estado
 
 
 @app.get("/painel", response_class=HTMLResponse)
@@ -424,30 +543,78 @@ function desenharGrafico(candles){
  ctx.fillText("EMA 200",145,h-5);
 }
 
-let contaSelecionada = "PRACTICE";
 
-function selecionarConta(conta){
- if(!["PRACTICE","REAL"].includes(conta)) return;
- contaSelecionada = conta;
- document.getElementById("contaSelecionada").textContent =
-  "Conta selecionada: " + conta;
- document.getElementById("practiceBtn").style.opacity =
-  conta === "PRACTICE" ? "1" : "0.55";
- document.getElementById("realBtn").style.opacity =
-  conta === "REAL" ? "1" : "0.55";
- document.getElementById("avisoConta").textContent =
-  conta === "REAL"
-   ? "REAL selecionada. Conexão e ordens reais ainda não estão integradas."
-   : "Monitor conectado em PRACTICE. Nenhuma ordem é executada.";
+let contaSelecionada = null;
+let solicitandoConta = false;
+
+function atualizarEstadoConta(conta) {
+ const label = document.getElementById("contaSelecionada");
+ const aviso = document.getElementById("avisoConta");
+ const practice = document.getElementById("practiceBtn");
+ const real = document.getElementById("realBtn");
+
+ const confirmada = conta && conta.confirmed;
+ contaSelecionada = confirmada || null;
+
+ label.textContent = confirmada
+  ? "Conta confirmada: " + confirmada
+  : "Conta ainda não confirmada";
+
+ practice.style.opacity = confirmada === "PRACTICE" ? "1" : "0.55";
+ real.style.opacity = confirmada === "REAL" ? "1" : "0.55";
+ aviso.textContent = conta?.message || "Aguardando monitor da IQ Option.";
+
+ if (conta?.status === "PENDENTE") {
+  aviso.textContent = "Aguardando confirmação da IQ Option.";
+ }
 }
 
-selecionarConta("PRACTICE");
+async function selecionarConta(conta) {
+ if (!["PRACTICE", "REAL"].includes(conta) || solicitandoConta) return;
+
+ if (conta === "REAL" &&
+     !confirm("Confirma a troca para a conta REAL? Nenhuma ordem será enviada.")) return;
+
+ solicitandoConta = true;
+ const practice = document.getElementById("practiceBtn");
+ const real = document.getElementById("realBtn");
+ practice.disabled = true;
+ real.disabled = true;
+
+ document.getElementById("avisoConta").textContent =
+  "Enviando solicitação ao monitor...";
+
+ try {
+  const resposta = await fetch("/api/v1/account/select", {
+   method: "POST",
+   headers: {"Content-Type": "application/json"},
+   body: JSON.stringify({
+    account: conta,
+    confirm_real: conta === "REAL"
+   })
+  });
+
+  const dados = await resposta.json();
+  if (!resposta.ok) throw new Error(dados.detail || "Falha na solicitação.");
+
+  document.getElementById("avisoConta").textContent =
+   "Solicitação enviada. Aguardando IQ Option.";
+
+ } catch (erro) {
+  document.getElementById("avisoConta").textContent = erro.message;
+ } finally {
+  solicitandoConta = false;
+  practice.disabled = false;
+  real.disabled = false;
+ }
+}
 
 async function atualizar(){
  try{
   const r=await fetch('/api/v1/monitor/public-state');
   if(!r.ok) throw new Error('HTTP '+r.status);
   const d=await r.json();
+  atualizarEstadoConta(d.account);
   const x=d.latest||{},s=d.stats||{};
   const ultima=d.updated_at?new Date(d.updated_at).getTime():0;
   const online=ultima>0&&(Date.now()-ultima)<1200000;
