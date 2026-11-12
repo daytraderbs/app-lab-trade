@@ -1,4 +1,8 @@
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Request
+import secrets
+import hmac
+import time
 from fastapi import FastAPI, HTTPException, Security, Depends 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
@@ -11,11 +15,75 @@ import os
 app = FastAPI(title="AI Trade Lab API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://app-lab-trade-1.onrender.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# AUTENTICACAO ADMINISTRATIVA
+ADMIN_PASSWORD = os.environ.get("PANEL_ADMIN_PASSWORD")
+ADMIN_SESSIONS = {}
+LOGIN_ATTEMPTS = {}
+LOGIN_LIMIT = 5
+LOGIN_WINDOW = 15 * 60
+SESSION_TTL = 12 * 60 * 60
+
+class AdminLogin(BaseModel):
+    password: str
+
+def validar_sessao(request):
+    token = request.cookies.get("admin_session")
+    expira = ADMIN_SESSIONS.get(token)
+
+    if not token or not expira:
+        return False
+
+    if expira < time.time():
+        ADMIN_SESSIONS.pop(token, None)
+        return False
+
+    return True
+
+@app.post("/api/admin/login")
+def admin_login(data: AdminLogin, request: Request):
+    if not ADMIN_PASSWORD:
+        raise HTTPException(status_code=500, detail="Senha administrativa não configurada.")
+
+    ip = request.client.host if request.client else "desconhecido"
+    agora = time.time()
+    tentativas = LOGIN_ATTEMPTS.get(ip, [])
+
+    tentativas = [t for t in tentativas if agora - t < LOGIN_WINDOW]
+    LOGIN_ATTEMPTS[ip] = tentativas
+
+    if len(tentativas) >= LOGIN_LIMIT:
+        raise HTTPException(status_code=429, detail="Muitas tentativas. Aguarde 15 minutos.")
+
+    if not hmac.compare_digest(data.password, ADMIN_PASSWORD):
+        tentativas.append(agora)
+        LOGIN_ATTEMPTS[ip] = tentativas
+        raise HTTPException(status_code=401, detail="Senha incorreta.")
+
+    LOGIN_ATTEMPTS.pop(ip, None)
+    token = secrets.token_urlsafe(32)
+    ADMIN_SESSIONS[token] = time.time() + SESSION_TTL
+    response = JSONResponse({"status": "autenticado"})
+    response.set_cookie(
+        key="admin_session", value=token,
+        httponly=True, secure=True, samesite="strict",
+        max_age=SESSION_TTL, path="/"
+    )
+    return response
+
+@app.post("/api/admin/logout")
+def admin_logout(request: Request):
+    token = request.cookies.get("admin_session")
+    ADMIN_SESSIONS.pop(token, None)
+    response = JSONResponse({"status": "desconectado"})
+    response.delete_cookie("admin_session", path="/")
+    return response
+
 @app.get("/")
 def redirect_to_docs():
     from fastapi.responses import RedirectResponse
@@ -111,12 +179,58 @@ def get_monitor_state(token: str = Depends(verify_subscriber)):
 
 
 @app.get("/api/v1/monitor/public-state")
-def public_monitor_state():
+def public_monitor_state(request: Request):
+    if not validar_sessao(request):
+        raise HTTPException(status_code=401, detail="Login administrativo necessário.")
     return monitor_state.copy()
 
 
 @app.get("/painel", response_class=HTMLResponse)
-def painel():
+def painel(request: Request):
+    if not validar_sessao(request):
+        return HTMLResponse("""
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login • AI Trade Lab</title>
+<style>
+body{background:#080f1c;color:#e8eef8;font-family:Arial;display:grid;place-items:center;min-height:90vh}
+.card{background:#17263a;padding:28px;border-radius:15px;width:85%;max-width:350px}
+input,button{box-sizing:border-box;width:100%;padding:13px;margin-top:12px;border-radius:8px}
+button{background:#20c997;border:0;font-weight:bold}
+#erro{color:#ff7185}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>AI Trade Lab</h2>
+<p>Acesso administrativo</p>
+<form id="login">
+<input id="senha" type="password" placeholder="Senha administrativa" required>
+<button type="submit">ENTRAR</button>
+</form>
+<p id="erro"></p>
+</div>
+<script>
+document.getElementById("login").addEventListener("submit",async e=>{
+ e.preventDefault();
+ const erro=document.getElementById("erro");
+ try{
+  const r=await fetch("/api/admin/login",{
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify({password:document.getElementById("senha").value})
+  });
+  if(!r.ok) throw new Error("Senha incorreta ou erro de autenticação.");
+  location.reload();
+ }catch(err){erro.textContent=err.message;}
+});
+</script>
+</body>
+</html>
+""", status_code=401)
     return """
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -154,6 +268,7 @@ canvas{display:block;max-width:100%}
 <div class="container">
 <h1>AI Trade Lab</h1>
 <p class="menor">Monitor de mercado • EUR/USD • M15</p>
+<button onclick="sairPainel()" style="float:right;background:#b83248;color:white;border:0;padding:10px 18px;border-radius:8px;cursor:pointer">SAIR</button>
 <div class="card">
 <h3>Seleção de conta</h3>
 <button id="practiceBtn" onclick="selecionarConta('PRACTICE')">PRACTICE</button>
@@ -191,6 +306,11 @@ canvas{display:block;max-width:100%}
 <p class="menor" id="atualizacao">Aguardando atualização...</p>
 </div>
 <script>
+async function sairPainel(){
+    await fetch("/api/admin/logout", {method:"POST"});
+    location.reload();
+}
+
 function horarioBR(data){
  if(!data) return "--";
  const d=new Date(data);
