@@ -224,7 +224,7 @@ function desenharGrafico(candles){
  const e9=calcularEMA(9);
  const e21=calcularEMA(21);
  const e200=calcularEMA(200);
- const inicio=Math.max(0,candles.length-100);
+ const inicio=Math.max(0,candles.length-50);
  const dados=candles.slice(inicio);
  const valores=dados.flatMap(v=>[
   Number(v.high),Number(v.low)
