@@ -221,6 +221,8 @@ def get_monitor_commands(token: str = Depends(verify_subscriber)):
 def receive_command_result(data: AccountCommandResult, token: str = Depends(verify_subscriber)):
     global pending_account_command
 
+    limpar_comando_expirado()
+
     if not pending_account_command or data.command_id != pending_account_command["command_id"]:
         raise HTTPException(status_code=409, detail="Comando inexistente ou já processado.")
 
@@ -386,7 +388,7 @@ canvas{display:block;max-width:100%}
 <body>
 <div class="container">
 <h1>AI Trade Lab</h1>
-<p class="menor">Monitor de mercado • EUR/USD • M15</p>
+<p class="menor">Monitor de mercado • EUR/USD • M1</p>
 <button onclick="sairPainel()" style="float:right;background:#b83248;color:white;border:0;padding:10px 18px;border-radius:8px;cursor:pointer">SAIR</button>
 <div class="card">
 <h3>Seleção de conta</h3>
@@ -412,7 +414,7 @@ canvas{display:block;max-width:100%}
 <div id="detalhe" class="menor">Aguardando sincronização do monitor.</div>
 </div>
 <div class="card">
-<h3>Gráfico EUR/USD · M15</h3>
+<h3>Gráfico EUR/USD · M1</h3>
 <canvas id="grafico" height="180" style="width:100%"></canvas>
 </div>
 <div class="card">
