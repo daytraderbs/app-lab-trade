@@ -153,7 +153,14 @@ canvas{display:block;max-width:100%}
 <body>
 <div class="container">
 <h1>AI Trade Lab</h1>
-<p class="menor">Monitor de mercado • EUR/USD • M15 • Conta PRACTICE</p>
+<p class="menor">Monitor de mercado • EUR/USD • M15</p>
+<div class="card">
+<h3>Seleção de conta</h3>
+<button id="practiceBtn" onclick="selecionarConta('PRACTICE')">PRACTICE</button>
+<button id="realBtn" onclick="selecionarConta('REAL')">REAL</button>
+<div id="contaSelecionada" class="menor">Conta selecionada: PRACTICE</div>
+<div id="avisoConta" class="menor">Monitor conectado em PRACTICE. Selecionar REAL não executa operações.</div>
+</div>
 <div class="grid">
 <div class="card">SINAL ATUAL<div class="valor" id="sinal">Aguardando dados</div></div>
 <div class="card">TAXA DE ACERTO<div class="valor" id="taxa">--</div></div>
@@ -296,6 +303,25 @@ function desenharGrafico(candles){
  ctx.fillStyle="#c58aff";
  ctx.fillText("EMA 200",145,h-5);
 }
+
+let contaSelecionada = "PRACTICE";
+
+function selecionarConta(conta){
+ if(!["PRACTICE","REAL"].includes(conta)) return;
+ contaSelecionada = conta;
+ document.getElementById("contaSelecionada").textContent =
+  "Conta selecionada: " + conta;
+ document.getElementById("practiceBtn").style.opacity =
+  conta === "PRACTICE" ? "1" : "0.55";
+ document.getElementById("realBtn").style.opacity =
+  conta === "REAL" ? "1" : "0.55";
+ document.getElementById("avisoConta").textContent =
+  conta === "REAL"
+   ? "REAL selecionada. Conexão e ordens reais ainda não estão integradas."
+   : "Monitor conectado em PRACTICE. Nenhuma ordem é executada.";
+}
+
+selecionarConta("PRACTICE");
 
 async function atualizar(){
  try{
