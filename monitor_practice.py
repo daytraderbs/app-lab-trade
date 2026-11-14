@@ -1,11 +1,14 @@
 import os
 import time
 import csv
+import json
+import threading
 import requests
 from pathlib import Path
 from datetime import datetime, timezone
 
 from iqoptionapi.stable_api import IQ_Option
+from iqoptionapi import stable_api
 from indicators import calculate_indicators
 from strategy import generate_signal
 
@@ -15,14 +18,45 @@ IQ_PASS = os.environ["IQ_PASS"]
 ATIVO = "EURUSD"
 TIMEFRAME = 60
 CANDLES_COUNT = 205
-CONTA = "PRACTICE"
 
 ARQUIVO = Path("monitor_practice.csv")
 RENDER_URL = "https://app-lab-trade-1.onrender.com/api/v1/monitor/update"
-COMMANDS_URL = "https://app-lab-trade-1.onrender.com/api/v1/monitor/commands"
+COMMAND_URL = "https://app-lab-trade-1.onrender.com/api/v1/monitor/commands"
 COMMAND_RESULT_URL = "https://app-lab-trade-1.onrender.com/api/v1/monitor/command-result"
-ACCOUNT_STATE_URL = "https://app-lab-trade-1.onrender.com/api/v1/monitor/account-state"
 TOKEN_SEGURANCA = os.environ.get("TOKEN_SEGURANCA")
+
+
+# Observação independente dos eventos de mudança de conta da IQ Option.
+evento_mudanca_conta = threading.Event()
+estado_mudanca_conta = {}
+lock_mudanca_conta = threading.Lock()
+
+
+def observar_evento_conta(ws, mensagem, opcode, fin):
+    if not fin:
+        return
+
+    try:
+        dados = json.loads(mensagem)
+
+        if dados.get("name") != "balance-changed":
+            return
+
+        saldo = dados.get("msg", {}).get("current_balance", {})
+
+        with lock_mudanca_conta:
+            estado_mudanca_conta.clear()
+            estado_mudanca_conta.update({
+                "id": saldo.get("id"),
+                "type": saldo.get("type"),
+                "amount": saldo.get("amount"),
+                "received_at": time.monotonic()
+            })
+            evento_mudanca_conta.set()
+
+    except Exception as erro:
+        print(f"Aviso no observador de conta: {erro}")
+
 
 COLUNAS = [
     "timestamp",
@@ -53,17 +87,10 @@ def conectar():
         if not status:
             raise ConnectionError(str(mensagem))
 
-        api.change_balance(CONTA)
+        cliente_ws = api.api.websocket_client
+        cliente_ws.wss.on_data = observar_evento_conta
 
-        modo_confirmado = api.get_balance_mode()
-
-        if modo_confirmado != "PRACTICE":
-            raise RuntimeError(
-                f"Conta não confirmada como PRACTICE. "
-                f"Modalidade retornada: {modo_confirmado!r}"
-            )
-
-        print("Conta PRACTICE confirmada pela IQ Option.")
+        print("Conexão estabelecida. Observador de conta instalado.")
         return api
 
     except Exception:
@@ -214,6 +241,189 @@ def mostrar_estatisticas(rows):
 
 
 
+def consultar_comandos():
+    if not TOKEN_SEGURANCA:
+        return None
+    try:
+        resposta = requests.get(
+            COMMAND_URL,
+            headers={"X-Trader-Token": TOKEN_SEGURANCA},
+            timeout=5
+        )
+        resposta.raise_for_status()
+        dados = resposta.json()
+
+        tf = dados.get("timeframe")
+        return {
+            "timeframe": tf if tf in ("1m", "15m") else None,
+            "account_command": dados.get("account_command")
+        }
+    except requests.RequestException as erro:
+        print(f"Falha ao consultar comandos: {erro}")
+        return None
+
+
+
+def comando_ainda_pendente(command_id):
+    dados = consultar_comandos()
+    if not dados:
+        return False
+
+    comando = dados.get("account_command")
+    return (
+        isinstance(comando, dict)
+        and comando.get("command_id") == command_id
+        and comando.get("account") == "REAL"
+    )
+
+
+def enviar_resultado_comando(command_id, sucesso, account_id=None, account_type=None, mensagem=""):
+    payload = {
+        "command_id": command_id,
+        "account": "REAL",
+        "success": sucesso,
+        "account_id": account_id,
+        "account_type": account_type,
+        "message": mensagem
+    }
+
+    resposta = requests.post(
+        COMMAND_RESULT_URL,
+        json=payload,
+        headers={"X-Trader-Token": TOKEN_SEGURANCA},
+        timeout=10
+    )
+    resposta.raise_for_status()
+    return resposta.json()
+
+
+def processar_comando_conta(api, comando):
+    if not isinstance(comando, dict):
+        return
+
+    command_id = comando.get("command_id")
+
+    if not command_id or comando.get("account") != "REAL":
+        return
+
+    if not comando_ainda_pendente(command_id):
+        print("Comando REAL cancelado ou expirado. Nenhuma alteração feita.")
+        return
+
+    try:
+        # Aguarda o perfil sem permitir espera infinita.
+        limite = time.monotonic() + 10
+        perfil = None
+
+        while time.monotonic() < limite:
+            perfil = getattr(api.api.profile, "msg", None)
+            if isinstance(perfil, dict) and perfil.get("balances"):
+                break
+            time.sleep(0.2)
+
+        if not isinstance(perfil, dict):
+            raise RuntimeError("Perfil da IQ Option não recebido.")
+
+        saldos = perfil.get("balances", [])
+
+        conta_real = next(
+            (
+                conta for conta in saldos
+                if conta.get("type") == 1
+                and conta.get("id") is not None
+            ),
+            None
+        )
+
+        if conta_real is None:
+            raise RuntimeError("Conta REAL não encontrada na IQ Option.")
+
+        real_id = conta_real["id"]
+
+        if not comando_ainda_pendente(command_id):
+            print("Solicitação cancelada antes da troca REAL.")
+            return
+
+        # Limpa eventos anteriores para exigir uma confirmação nova.
+        with lock_mudanca_conta:
+            estado_mudanca_conta.clear()
+            evento_mudanca_conta.clear()
+            solicitacao_em = time.monotonic()
+
+        # Usa a sessão autenticada da IQ Option, com tempo limite.
+        recurso = api.api.changebalance
+        url = api.api.prepare_http_url(recurso)
+
+        resposta = api.api.session.request(
+            method="POST",
+            url=url,
+            data={"balance_id": real_id},
+            proxies=api.api.proxies,
+            timeout=(5, 10)
+        )
+        resposta.raise_for_status()
+
+        # HTTP 200 não basta: exige evento novo da própria IQ Option.
+        if not evento_mudanca_conta.wait(timeout=12):
+            raise RuntimeError(
+                "A IQ Option não confirmou a troca de conta no prazo esperado."
+            )
+
+        with lock_mudanca_conta:
+            evento = dict(estado_mudanca_conta)
+
+        if evento.get("received_at", 0) < solicitacao_em:
+            raise RuntimeError("Evento de confirmação anterior à solicitação.")
+
+        if str(evento.get("id")) != str(real_id):
+            raise RuntimeError("O ID recebido não corresponde à conta REAL.")
+
+        if evento.get("type") != 1:
+            raise RuntimeError("A IQ Option não confirmou o tipo REAL (1).")
+
+        if not comando_ainda_pendente(command_id):
+            print("Solicitação cancelada. Autorização REAL permanece bloqueada.")
+            return
+
+        # Atualiza as inscrições locais somente após confirmação do servidor.
+        id_anterior = stable_api.global_value.balance_id
+
+        if id_anterior is not None and str(id_anterior) != str(real_id):
+            api.position_change_all("unsubscribeMessage", id_anterior)
+
+        api.position_change_all("subscribeMessage", real_id)
+        stable_api.global_value.balance_id = real_id
+
+        if not comando_ainda_pendente(command_id):
+            print("Comando cancelado após a confirmação. REAL permanece bloqueado.")
+            return
+
+        enviar_resultado_comando(
+            command_id,
+            True,
+            real_id,
+            1,
+            "IQ Option confirmou a conta REAL por evento balance-changed."
+        )
+
+        print("Conta REAL confirmada pela IQ Option. Ordens continuam bloqueadas.")
+
+    except Exception as erro:
+        print(f"Falha na confirmação da conta REAL: {erro}")
+
+        if comando_ainda_pendente(command_id):
+            try:
+                enviar_resultado_comando(
+                    command_id,
+                    False,
+                    None,
+                    None,
+                    str(erro)
+                )
+            except requests.RequestException as envio_erro:
+                print(f"Falha ao comunicar o resultado: {envio_erro}")
+
+
 def enviar_estado_render(rows, candles):
     if not TOKEN_SEGURANCA or not rows:
         return
@@ -241,7 +451,7 @@ def enviar_estado_render(rows, candles):
             "taxa_acerto": round(acertos / total * 100, 2) if total else 0
         },
         "pair": ATIVO,
-        "timeframe": "1m",
+        "timeframe": "1m" if TIMEFRAME == 60 else "15m",
         "source": "monitor_practice"
     }
 
@@ -260,128 +470,39 @@ def enviar_estado_render(rows, candles):
 
 
 
-ultimo_comando_processado = None
-resultado_pendente = None
-
-
-def processar_comando_conta(api):
-    global ultimo_comando_processado, resultado_pendente
-
-    if not TOKEN_SEGURANCA:
-        return
-
-    headers = {"X-Trader-Token": TOKEN_SEGURANCA}
-
-    if resultado_pendente:
-        try:
-            r = requests.post(
-                COMMAND_RESULT_URL,
-                json=resultado_pendente,
-                headers=headers,
-                timeout=15
-            )
-            if r.status_code == 409:
-                print("Comando expirado ou já encerrado no Render.")
-                resultado_pendente = None
-            else:
-                r.raise_for_status()
-                print("Resultado da troca de conta confirmado no Render.")
-                resultado_pendente = None
-        except requests.RequestException:
-            print("Resultado pendente: tentando reenviar.")
-        return
-
-    try:
-        r = requests.get(COMMANDS_URL, headers=headers, timeout=10)
-        r.raise_for_status()
-        comando = r.json().get("command")
-
-        if not comando:
-            return
-
-        command_id = comando.get("command_id")
-        conta = comando.get("account")
-
-        if not command_id or command_id == ultimo_comando_processado:
-            return
-
-        ultimo_comando_processado = command_id
-
-        sucesso = False
-        mensagem = ""
-
-        try:
-            criado = float(comando.get("created_at", 0))
-
-            if time.time() - criado > 60 or criado > time.time() + 5:
-                raise RuntimeError("Comando expirado.")
-
-            if conta not in ("PRACTICE", "REAL"):
-                raise RuntimeError("Conta solicitada inválida.")
-
-            print(f"Solicitação de troca para {conta} recebida.")
-            api.change_balance(conta)
-            time.sleep(2)
-
-            confirmada = api.get_balance_mode()
-            sucesso = confirmada == conta
-
-            mensagem = (
-                f"Conta {conta} confirmada pela IQ Option."
-                if sucesso else
-                f"Falha na confirmação. IQ Option retornou: {confirmada!r}"
-            )
-
-        except Exception as erro:
-            mensagem = str(erro)
-
-        resultado_pendente = {
-            "command_id": command_id,
-            "success": sucesso,
-            "account": conta,
-            "message": mensagem
-        }
-
-        print(mensagem)
-
-    except requests.RequestException as erro:
-        print(f"Falha ao consultar comandos do Render: {erro}")
-
-
-def sincronizar_estado_conta(api):
-    if not TOKEN_SEGURANCA:
-        print("Token ausente: estado da conta não sincronizado.")
-        return
-
-    conta = api.get_balance_mode()
-    if conta not in ("PRACTICE", "REAL"):
-        raise RuntimeError("IQ Option retornou modalidade inválida.")
-
-    resposta = requests.post(
-        ACCOUNT_STATE_URL,
-        json={"account": conta},
-        headers={"X-Trader-Token": TOKEN_SEGURANCA},
-        timeout=15
-    )
-    resposta.raise_for_status()
-    print(f"Conta {conta} sincronizada com o painel.")
-
-
 def executar():
+    global TIMEFRAME, ARQUIVO
     api = conectar()
-    sincronizar_estado_conta(api)
     rows = carregar_historico()
     registrados = {int(r["timestamp"]) for r in rows}
 
     primeiro_ciclo = not rows
     ultimo_timestamp = max(registrados, default=0)
 
-    print("Monitor PRACTICE iniciado.")
+    print("Monitor de mercado iniciado — sem seleção de conta.")
     print("Ordens reais e operações automáticas: DESATIVADAS.")
 
     while True:
         try:
-            processar_comando_conta(api)
+            comandos = consultar_comandos()
+
+            if comandos:
+                processar_comando_conta(
+                    api,
+                    comandos.get("account_command")
+                )
+
+            solicitado = comandos.get("timeframe") if comandos else None
+            if solicitado:
+                novo = 60 if solicitado == "1m" else 900
+                if novo != TIMEFRAME:
+                    TIMEFRAME = novo
+                    ARQUIVO = Path("monitor_practice.csv" if novo == 60 else "monitor_practice_15m.csv")
+                    rows = carregar_historico()
+                    registrados = {int(r["timestamp"]) for r in rows}
+                    primeiro_ciclo = not rows
+                    ultimo_timestamp = max(registrados, default=0)
+                    print(f"Timeframe alterado para {solicitado}: {ARQUIVO}")
             agora = time.time()
 
             candles = api.get_candles(

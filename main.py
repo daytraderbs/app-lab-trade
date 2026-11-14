@@ -6,7 +6,7 @@ import time
 from fastapi import FastAPI, HTTPException, Security, Depends 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 from typing import List, Dict
 from indicators import calculate_indicators
 from risk import calculate_position_size
@@ -99,7 +99,7 @@ MASTER_SUBSCRIPTION_TOKEN = os.environ.get("MASTER_SUBSCRIPTION_TOKEN")
 async def verify_subscriber(api_key: str = Depends(api_key_header)):
     if not MASTER_SUBSCRIPTION_TOKEN:
         raise HTTPException(status_code=500, detail="Token de segurança não configurado no servidor.")
-    if not api_key or api_key != MASTER_SUBSCRIPTION_TOKEN:
+    if not api_key or not secrets.compare_digest(api_key, MASTER_SUBSCRIPTION_TOKEN):
         raise HTTPException(
             status_code=403, 
             detail="Acesso negado. Token de assinatura inválido ou expirado."
@@ -142,136 +142,217 @@ def risk_management(risk: RiskSchema, token: str = Depends(verify_subscriber)):
 
 
 
-# CONTROLE SEGURO DE SELECAO DE CONTA
-class AccountSelection(BaseModel):
-    account: str
+# CONTROLE SEGURO DA CONTA REAL
+
+class RealAuthorization(BaseModel):
     confirm_real: bool = False
 
-class AccountCommandResult(BaseModel):
+class MonitorCommandResult(BaseModel):
     command_id: str
-    success: bool
     account: str
+    success: bool
+    account_id: StrictInt | None = None
+    account_type: StrictInt | None = None
     message: str = ""
 
+real_authorized = False
+real_authorization_message = "Operações REAL bloqueadas por segurança."
+
 pending_account_command = None
+ACCOUNT_COMMAND_TTL = 60
+
 account_status = {
-    "requested": "PRACTICE",
+    "requested": None,
     "confirmed": None,
-    "status": "AGUARDANDO_MONITOR",
-    "message": "Aguardando confirmação da IQ Option."
+    "status": "BLOQUEADO",
+    "message": "Nenhuma conta REAL autorizada."
 }
 
+monitor_timeframe = "1m"
+
+
 def limpar_comando_expirado():
-    global pending_account_command
+    global pending_account_command, real_authorized, real_authorization_message
 
-    if pending_account_command is None:
-        return
-
-    idade = time.time() - pending_account_command["created_at"]
-
-    if idade > 60:
-        conta = pending_account_command["account"]
+    if (
+        pending_account_command
+        and time.time() - pending_account_command["created_at"] > ACCOUNT_COMMAND_TTL
+    ):
         pending_account_command = None
-        account_status.update({
-            "status": "EXPIRADO",
-            "message": f"Solicitação de {conta} expirou. Tente novamente."
-        })
+        real_authorized = False
+        account_status["status"] = "EXPIRADO"
+        account_status["requested"] = None
+        account_status["confirmed"] = None
+        account_status["message"] = "Solicitação REAL expirou. Autorização bloqueada."
+        real_authorization_message = account_status["message"]
 
 
-@app.post("/api/v1/account/select")
-def select_account(data: AccountSelection, request: Request):
-    global pending_account_command
+@app.post("/api/v1/trading/real/enable")
+def enable_real(data: RealAuthorization, request: Request):
+    global real_authorized, pending_account_command, real_authorization_message
 
     if not validar_sessao(request):
         raise HTTPException(status_code=401, detail="Login necessário.")
 
-    if data.account not in ("PRACTICE", "REAL"):
-        raise HTTPException(status_code=400, detail="Conta inválida.")
+    if data.confirm_real is not True:
+        raise HTTPException(status_code=403, detail="Confirmação explícita necessária.")
 
-    if data.account == "REAL" and data.confirm_real is not True:
-        raise HTTPException(status_code=403, detail="Confirmação explícita de REAL necessária.")
-
-    limpar_comando_expirado()
-
-    if pending_account_command is not None:
-        raise HTTPException(status_code=409, detail="Já existe uma troca pendente.")
+    real_authorized = False
 
     pending_account_command = {
         "command_id": secrets.token_urlsafe(24),
-        "account": data.account,
+        "account": "REAL",
         "created_at": time.time()
     }
 
     account_status.update({
-        "requested": data.account,
-        "status": "PENDENTE",
-        "message": "Aguardando confirmação da IQ Option."
+        "requested": "REAL",
+        "confirmed": None,
+        "status": "AGUARDANDO_MONITOR",
+        "message": "Aguardando confirmação da conta REAL pela IQ Option."
     })
+    real_authorization_message = account_status["message"]
 
-    return {"status": "PENDENTE", "command_id": pending_account_command["command_id"]}
+    return {
+        "real_authorized": False,
+        "pending": True,
+        "message": account_status["message"]
+    }
+
+
+@app.post("/api/v1/trading/real/disable")
+def disable_real(request: Request):
+    global real_authorized, pending_account_command, real_authorization_message
+
+    if not validar_sessao(request):
+        raise HTTPException(status_code=401, detail="Login necessário.")
+
+    real_authorized = False
+    pending_account_command = None
+
+    account_status.update({
+        "requested": None,
+        "confirmed": None,
+        "status": "BLOQUEADO",
+        "message": "REAL bloqueado pelo interruptor PRACTICE."
+    })
+    real_authorization_message = account_status["message"]
+
+    return {
+        "real_authorized": False,
+        "message": account_status["message"]
+    }
 
 
 @app.get("/api/v1/monitor/commands")
 def get_monitor_commands(token: str = Depends(verify_subscriber)):
     limpar_comando_expirado()
-    return {"command": pending_account_command}
+
+    comando = None
+    if pending_account_command:
+        comando = {
+            "command_id": pending_account_command["command_id"],
+            "account": pending_account_command["account"]
+        }
+
+    return {
+        "timeframe": monitor_timeframe,
+        "account_command": comando
+    }
 
 
 @app.post("/api/v1/monitor/command-result")
-def receive_command_result(data: AccountCommandResult, token: str = Depends(verify_subscriber)):
-    global pending_account_command
+def receive_monitor_command_result(
+    data: MonitorCommandResult,
+    token: str = Depends(verify_subscriber)
+):
+    global real_authorized, pending_account_command, real_authorization_message
 
     limpar_comando_expirado()
 
-    if not pending_account_command or data.command_id != pending_account_command["command_id"]:
-        raise HTTPException(status_code=409, detail="Comando inexistente ou já processado.")
+    if not pending_account_command:
+        raise HTTPException(status_code=409, detail="Nenhum comando pendente.")
 
-    if data.account != pending_account_command["account"]:
-        raise HTTPException(status_code=400, detail="Conta retornada não corresponde à solicitada.")
+    if not secrets.compare_digest(
+        data.command_id,
+        pending_account_command["command_id"]
+    ):
+        raise HTTPException(status_code=409, detail="Comando cancelado ou inválido.")
 
-    account_status.update({
-        "requested": data.account,
-        "confirmed": data.account if data.success else account_status["confirmed"],
-        "status": "CONFIRMADA" if data.success else "FALHA",
-        "message": data.message
-    })
+    if data.account != "REAL":
+        raise HTTPException(status_code=400, detail="Somente confirmação REAL é aceita.")
 
     pending_account_command = None
 
-    return {"status": "recebido"}
+    if data.success is True and data.account_id is not None and data.account_id > 0 and data.account_type == 1:
+        real_authorized = True
+        account_status.update({
+            "requested": "REAL",
+            "confirmed": "REAL",
+            "status": "CONFIRMADO",
+            "message": "Conta REAL confirmada pela IQ Option. Cada ordem exige confirmação."
+        })
+        real_authorization_message = account_status["message"]
+    else:
+        real_authorized = False
+        account_status.update({
+            "requested": "REAL",
+            "confirmed": None,
+            "status": "FALHA",
+            "message": data.message or "Não foi possível confirmar a conta REAL."
+        })
+        real_authorization_message = account_status["message"]
 
+    return {
+        "real_authorized": real_authorized,
+        "status": account_status["status"],
+        "message": account_status["message"]
+    }
+
+
+@app.post("/api/v1/monitor/timeframe")
+def set_monitor_timeframe(data: Dict, request: Request):
+    global monitor_timeframe
+
+    if not validar_sessao(request):
+        raise HTTPException(status_code=401, detail="Login necessário.")
+
+    timeframe = data.get("timeframe")
+
+    if timeframe not in ("1m", "15m"):
+        raise HTTPException(status_code=400, detail="Timeframe inválido.")
+
+    monitor_timeframe = timeframe
+    return {"status": "ok", "timeframe": monitor_timeframe}
 
 
 @app.post("/api/v1/monitor/account-state")
 def receive_account_state(data: Dict, token: str = Depends(verify_subscriber)):
-    conta = data.get("account")
-    if conta != "PRACTICE":
-        raise HTTPException(
-            status_code=403,
-            detail="Sincronização inicial permitida somente em PRACTICE."
-        )
-
-    account_status.update({
-        "requested": conta,
-        "confirmed": conta,
-        "status": "CONFIRMADA",
-        "message": f"Conta {conta} confirmada pela IQ Option."
-    })
-    return {"status": "recebido"}
+    raise HTTPException(status_code=410, detail="Sincronizacao livre desativada.")
 
 
-# Estado recebido do monitor PRACTICE
-monitor_state = {
-    "updated_at": None,
-    "latest": None,
-    "history": [],
-    "candles": [],
-    "stats": {}
+# Estados independentes recebidos do monitor
+def novo_monitor_state():
+    return {
+        "updated_at": None,
+        "latest": None,
+        "history": [],
+        "candles": [],
+        "stats": {}
+    }
+
+monitor_states = {
+    "1m": novo_monitor_state(),
+    "15m": novo_monitor_state()
 }
 
 @app.post("/api/v1/monitor/update")
 def update_monitor(data: Dict, token: str = Depends(verify_subscriber)):
     from datetime import datetime, timezone
+
+    timeframe = data.get("timeframe")
+    if timeframe not in ("1m", "15m"):
+        raise HTTPException(status_code=400, detail="Timeframe inválido.")
 
     if not isinstance(data.get("latest"), dict):
         raise HTTPException(status_code=400, detail="Sinal atual inválido.")
@@ -279,21 +360,29 @@ def update_monitor(data: Dict, token: str = Depends(verify_subscriber)):
     if not isinstance(data.get("history", []), list):
         raise HTTPException(status_code=400, detail="Histórico inválido.")
 
+    if not isinstance(data.get("candles", []), list):
+        raise HTTPException(status_code=400, detail="Candles inválidos.")
+
     if not isinstance(data.get("stats", {}), dict):
         raise HTTPException(status_code=400, detail="Estatísticas inválidas.")
 
-    monitor_state["latest"] = data["latest"]
-    monitor_state["history"] = data.get("history", [])[-300:]
-    monitor_state["candles"] = data.get("candles", [])[-205:]
-    monitor_state["stats"] = data.get("stats", {})
-    monitor_state["updated_at"] = datetime.now(timezone.utc).isoformat()
+    estado = monitor_states[timeframe]
+    estado["latest"] = data["latest"]
+    estado["history"] = data.get("history", [])[-300:]
+    estado["candles"] = data.get("candles", [])[-205:]
+    estado["stats"] = data.get("stats", {})
+    estado["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    return {"status": "recebido", "updated_at": monitor_state["updated_at"]}
+    return {
+        "status": "recebido",
+        "timeframe": timeframe,
+        "updated_at": estado["updated_at"]
+    }
 
 
 @app.get("/api/v1/monitor/state")
 def get_monitor_state(token: str = Depends(verify_subscriber)):
-    return monitor_state.copy()
+    return {**monitor_states[monitor_timeframe], "timeframe": monitor_timeframe}
 
 
 
@@ -301,8 +390,12 @@ def get_monitor_state(token: str = Depends(verify_subscriber)):
 def public_monitor_state(request: Request):
     if not validar_sessao(request):
         raise HTTPException(status_code=401, detail="Login administrativo necessário.")
-    estado = monitor_state.copy()
-    estado["account"] = account_status.copy()
+    estado = {**monitor_states[monitor_timeframe], "timeframe": monitor_timeframe}
+    estado["trading"] = {
+        "real_authorized": real_authorized,
+        "message": account_status["message"],
+        "account_status": account_status.copy()
+    }
     return estado
 
 
@@ -388,14 +481,23 @@ canvas{display:block;max-width:100%}
 <body>
 <div class="container">
 <h1>AI Trade Lab</h1>
-<p class="menor">Monitor de mercado • EUR/USD • M1</p>
+<p class="menor" id="tituloMonitor">Monitor de mercado • EUR/USD • M1</p>
+<div class="card">
+<h3>Timeframe do monitor</h3>
+<select id="timeframeSelect" onchange="mudarTimeframe(this.value)"
+style="padding:13px;width:100%;border-radius:8px;background:#17263a;color:white;border:1px solid #48e0ad">
+<option value="1m">M1 — 1 minuto</option>
+<option value="15m">M15 — 15 minutos</option>
+</select>
+<div class="menor" id="timeframeStatus">Monitor único • Alternância sem reinicialização.</div>
+</div>
 <button onclick="sairPainel()" style="float:right;background:#b83248;color:white;border:0;padding:10px 18px;border-radius:8px;cursor:pointer">SAIR</button>
 <div class="card">
-<h3>Seleção de conta</h3>
-<button id="practiceBtn" onclick="selecionarConta('PRACTICE')">PRACTICE</button>
-<button id="realBtn" onclick="selecionarConta('REAL')">REAL</button>
-<div id="contaSelecionada" class="menor">Conta selecionada: PRACTICE</div>
-<div id="avisoConta" class="menor">Monitor conectado em PRACTICE. Selecionar REAL não executa operações.</div>
+<h3>Controle de segurança</h3>
+<button id="practiceBtn" onclick="alternarReal(false)">PRACTICE — BLOQUEAR REAL</button>
+<button id="realBtn" onclick="alternarReal(true)">REAL — AUTORIZAR</button>
+<div id="contaSelecionada" class="menor">Autorização REAL: BLOQUEADA</div>
+<div id="avisoConta" class="menor">Operações reais bloqueadas por segurança.</div>
 </div>
 <div class="grid">
 <div class="card">SINAL ATUAL<div class="valor" id="sinal">Aguardando dados</div></div>
@@ -414,7 +516,7 @@ canvas{display:block;max-width:100%}
 <div id="detalhe" class="menor">Aguardando sincronização do monitor.</div>
 </div>
 <div class="card">
-<h3>Gráfico EUR/USD · M1</h3>
+<h3 id="tituloGrafico">Gráfico EUR/USD · M1</h3>
 <canvas id="grafico" height="180" style="width:100%"></canvas>
 </div>
 <div class="card">
@@ -546,36 +648,26 @@ function desenharGrafico(candles){
 }
 
 
-let contaSelecionada = null;
+let realAutorizado = false;
 let solicitandoConta = false;
 
-function atualizarEstadoConta(conta) {
+function atualizarEstadoConta(trading) {
  const label = document.getElementById("contaSelecionada");
  const aviso = document.getElementById("avisoConta");
  const practice = document.getElementById("practiceBtn");
  const real = document.getElementById("realBtn");
 
- const confirmada = conta && conta.confirmed;
- contaSelecionada = confirmada || null;
-
- label.textContent = confirmada
-  ? "Conta confirmada: " + confirmada
-  : "Conta ainda não confirmada";
-
- practice.style.opacity = confirmada === "PRACTICE" ? "1" : "0.55";
- real.style.opacity = confirmada === "REAL" ? "1" : "0.55";
- aviso.textContent = conta?.message || "Aguardando monitor da IQ Option.";
-
- if (conta?.status === "PENDENTE") {
-  aviso.textContent = "Aguardando confirmação da IQ Option.";
- }
+ realAutorizado = trading?.real_authorized === true;
+ label.textContent = "Autorização REAL: " + (realAutorizado ? "ATIVA" : "BLOQUEADA");
+ practice.style.opacity = realAutorizado ? "0.55" : "1";
+ real.style.opacity = realAutorizado ? "1" : "0.55";
+ aviso.textContent = trading?.message || "REAL bloqueado por segurança.";
 }
 
-async function selecionarConta(conta) {
- if (!["PRACTICE", "REAL"].includes(conta) || solicitandoConta) return;
+async function alternarReal(ativar) {
+ if (solicitandoConta) return;
 
- if (conta === "REAL" &&
-     !confirm("Confirma a troca para a conta REAL? Nenhuma ordem será enviada.")) return;
+ if (ativar && !confirm("Confirma habilitar a autorização para operações na conta REAL? Cada ordem ainda exigirá confirmação individual.")) return;
 
  solicitandoConta = true;
  const practice = document.getElementById("practiceBtn");
@@ -583,25 +675,20 @@ async function selecionarConta(conta) {
  practice.disabled = true;
  real.disabled = true;
 
- document.getElementById("avisoConta").textContent =
-  "Enviando solicitação ao monitor...";
-
  try {
-  const resposta = await fetch("/api/v1/account/select", {
-   method: "POST",
-   headers: {"Content-Type": "application/json"},
-   body: JSON.stringify({
-    account: conta,
-    confirm_real: conta === "REAL"
-   })
-  });
+  const resposta = await fetch(
+   ativar ? "/api/v1/trading/real/enable" : "/api/v1/trading/real/disable",
+   {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: ativar ? JSON.stringify({confirm_real: true}) : "{}"
+   }
+  );
 
   const dados = await resposta.json();
-  if (!resposta.ok) throw new Error(dados.detail || "Falha na solicitação.");
+  if (!resposta.ok) throw new Error(dados.detail || "Falha ao alterar autorização.");
 
-  document.getElementById("avisoConta").textContent =
-   "Solicitação enviada. Aguardando IQ Option.";
-
+  atualizarEstadoConta(dados);
  } catch (erro) {
   document.getElementById("avisoConta").textContent = erro.message;
  } finally {
@@ -611,12 +698,49 @@ async function selecionarConta(conta) {
  }
 }
 
+let timeframeSelecionado = "1m";
+let alterandoTimeframe = false;
+
+async function mudarTimeframe(timeframe){
+ if(alterandoTimeframe) return;
+ alterandoTimeframe = true;
+ const seletor = document.getElementById("timeframeSelect");
+ const status = document.getElementById("timeframeStatus");
+ seletor.disabled = true;
+
+ try{
+  const r = await fetch("/api/v1/monitor/timeframe", {
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify({timeframe})
+  });
+  const d = await r.json();
+  if(!r.ok) throw new Error(d.detail || "Falha ao alterar timeframe.");
+
+  timeframeSelecionado = d.timeframe;
+  status.textContent = "Timeframe ativo: " + (timeframe === "1m" ? "M1" : "M15");
+  await atualizar();
+ }catch(e){
+  seletor.value = timeframeSelecionado;
+  status.textContent = "Erro: " + e.message;
+ }finally{
+  seletor.disabled = false;
+  alterandoTimeframe = false;
+ }
+}
+
 async function atualizar(){
  try{
   const r=await fetch('/api/v1/monitor/public-state');
   if(!r.ok) throw new Error('HTTP '+r.status);
   const d=await r.json();
-  atualizarEstadoConta(d.account);
+  atualizarEstadoConta(d.trading);
+  const tf=d.timeframe||"1m";
+  timeframeSelecionado=tf;
+  document.getElementById("timeframeSelect").value=tf;
+  const nomeTF=tf==="15m"?"M15":"M1";
+  document.getElementById("tituloMonitor").textContent="Monitor de mercado • EUR/USD • "+nomeTF;
+  document.getElementById("tituloGrafico").textContent="Gráfico EUR/USD · "+nomeTF;
   const x=d.latest||{},s=d.stats||{};
   const ultima=d.updated_at?new Date(d.updated_at).getTime():0;
   const online=ultima>0&&(Date.now()-ultima)<1200000;
