@@ -11,8 +11,26 @@ from typing import List, Dict
 from indicators import calculate_indicators
 from risk import calculate_position_size
 from strategy import generate_signal
+import risk_store
 import os
-app = FastAPI(title="AI Trade Lab API")
+import asyncio
+from contextlib import asynccontextmanager
+from market_context_service import get_market_context, run_market_context_scheduler
+from hybrid_engine import analyze_hybrid
+@asynccontextmanager
+async def lifespan(app):
+    task = asyncio.create_task(run_market_context_scheduler())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="AI Trade Lab API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://app-lab-trade-1.onrender.com"],
@@ -115,6 +133,11 @@ class RiskSchema(BaseModel):
     stop_loss_pips: float
 
 # Rota pública apenas para checar se o servidor está online
+@app.get("/api/v1/market-context")
+def read_market_context(token: str = Depends(verify_subscriber)):
+    return get_market_context()
+
+
 @app.get("/api")
 def read_root():
     return {"status": "AI Trade Lab operacional", "security": "Ativa (Exige X-Trader-Token)"}
@@ -153,13 +176,42 @@ class MonitorCommandResult(BaseModel):
     success: bool
     account_id: StrictInt | None = None
     account_type: StrictInt | None = None
+    balance: float | None = None
     message: str = ""
 
+
+class ManualOrderRequest(BaseModel):
+    side: str
+    amount: float
+    option_type: str
+    duration: StrictInt
+    confirm_order: bool
+
+
+class ManualOrderResult(BaseModel):
+    command_id: str
+    success: bool
+    order_id: str = ""
+    message: str = ""
+
+
+class ManualOrderSettlement(BaseModel):
+    command_id: str
+    order_id: str
+    realized_pnl: float
+
 real_authorized = False
+real_account_id = None
 real_authorization_message = "Operações REAL bloqueadas por segurança."
 
 pending_account_command = None
 ACCOUNT_COMMAND_TTL = 60
+
+# FILA DE ORDENS MANUAIS
+pending_manual_order = None
+MANUAL_ORDER_TTL = 30
+last_manual_order_result = None
+
 
 account_status = {
     "requested": None,
@@ -172,13 +224,15 @@ monitor_timeframe = "1m"
 
 
 def limpar_comando_expirado():
-    global pending_account_command, real_authorized, real_authorization_message
+    global pending_account_command, pending_manual_order
+    global real_authorized, real_authorization_message
 
     if (
         pending_account_command
         and time.time() - pending_account_command["created_at"] > ACCOUNT_COMMAND_TTL
     ):
         pending_account_command = None
+        pending_manual_order = None
         real_authorized = False
         account_status["status"] = "EXPIRADO"
         account_status["requested"] = None
@@ -189,46 +243,22 @@ def limpar_comando_expirado():
 
 @app.post("/api/v1/trading/real/enable")
 def enable_real(data: RealAuthorization, request: Request):
-    global real_authorized, pending_account_command, real_authorization_message
-
-    if not validar_sessao(request):
-        raise HTTPException(status_code=401, detail="Login necessário.")
-
-    if data.confirm_real is not True:
-        raise HTTPException(status_code=403, detail="Confirmação explícita necessária.")
-
-    real_authorized = False
-
-    pending_account_command = {
-        "command_id": secrets.token_urlsafe(24),
-        "account": "REAL",
-        "created_at": time.time()
-    }
-
-    account_status.update({
-        "requested": "REAL",
-        "confirmed": None,
-        "status": "AGUARDANDO_MONITOR",
-        "message": "Aguardando confirmação da conta REAL pela IQ Option."
-    })
-    real_authorization_message = account_status["message"]
-
-    return {
-        "real_authorized": False,
-        "pending": True,
-        "message": account_status["message"]
-    }
-
+    raise HTTPException(
+        status_code=403,
+        detail="AI Trade Lab está configurado exclusivamente para análise. Conta REAL indisponível."
+    )
 
 @app.post("/api/v1/trading/real/disable")
 def disable_real(request: Request):
-    global real_authorized, pending_account_command, real_authorization_message
+    global real_authorized, pending_account_command
+    global pending_manual_order, real_authorization_message
 
     if not validar_sessao(request):
         raise HTTPException(status_code=401, detail="Login necessário.")
 
     real_authorized = False
     pending_account_command = None
+    pending_manual_order = None
 
     account_status.update({
         "requested": None,
@@ -244,71 +274,72 @@ def disable_real(request: Request):
     }
 
 
+
+@app.post("/api/v1/trading/manual-order")
+def create_manual_order(data: ManualOrderRequest, request: Request):
+    raise HTTPException(
+        status_code=403,
+        detail="Execução de ordens desativada permanentemente neste analisador."
+    )
+
+@app.post("/api/v1/monitor/manual-order-result")
+def receber_resultado_ordem(
+    data: ManualOrderResult,
+    token: str = Depends(verify_subscriber)
+):
+    raise HTTPException(
+        status_code=403,
+        detail="Recebimento de ordens desativado no modo de análise."
+    )
+
+@app.post("/api/v1/monitor/manual-order-settlement")
+def receber_liquidacao_ordem(
+    data: ManualOrderSettlement,
+    token: str = Depends(verify_subscriber)
+):
+    raise HTTPException(
+        status_code=403,
+        detail="Liquidação de ordens indisponível no modo de análise."
+    )
+
+@app.get("/api/v1/monitor/open-orders")
+def recuperar_ordens_abertas(token: str = Depends(verify_subscriber)):
+    raise HTTPException(
+        status_code=403,
+        detail="Consulta de ordens indisponível no modo de análise."
+    )
+
+@app.get("/api/v1/trading/manual-order/status")
+def status_ordem_manual(command_id: str, request: Request):
+    raise HTTPException(
+        status_code=403,
+        detail="Status de ordens indisponível no modo de análise."
+    )
+
 @app.get("/api/v1/monitor/commands")
 def get_monitor_commands(token: str = Depends(verify_subscriber)):
-    limpar_comando_expirado()
-
-    comando = None
-    if pending_account_command:
-        comando = {
-            "command_id": pending_account_command["command_id"],
-            "account": pending_account_command["account"]
-        }
-
     return {
         "timeframe": monitor_timeframe,
-        "account_command": comando
+        "account_command": None,
+        "manual_order": None,
+        "real_authorized": False,
+        "account_status": {
+            "requested": None,
+            "confirmed": None,
+            "status": "BLOQUEADO",
+            "message": "Modo exclusivo de análise. Nenhuma ordem pode ser executada."
+        }
     }
-
 
 @app.post("/api/v1/monitor/command-result")
 def receive_monitor_command_result(
     data: MonitorCommandResult,
     token: str = Depends(verify_subscriber)
 ):
-    global real_authorized, pending_account_command, real_authorization_message
-
-    limpar_comando_expirado()
-
-    if not pending_account_command:
-        raise HTTPException(status_code=409, detail="Nenhum comando pendente.")
-
-    if not secrets.compare_digest(
-        data.command_id,
-        pending_account_command["command_id"]
-    ):
-        raise HTTPException(status_code=409, detail="Comando cancelado ou inválido.")
-
-    if data.account != "REAL":
-        raise HTTPException(status_code=400, detail="Somente confirmação REAL é aceita.")
-
-    pending_account_command = None
-
-    if data.success is True and data.account_id is not None and data.account_id > 0 and data.account_type == 1:
-        real_authorized = True
-        account_status.update({
-            "requested": "REAL",
-            "confirmed": "REAL",
-            "status": "CONFIRMADO",
-            "message": "Conta REAL confirmada pela IQ Option. Cada ordem exige confirmação."
-        })
-        real_authorization_message = account_status["message"]
-    else:
-        real_authorized = False
-        account_status.update({
-            "requested": "REAL",
-            "confirmed": None,
-            "status": "FALHA",
-            "message": data.message or "Não foi possível confirmar a conta REAL."
-        })
-        real_authorization_message = account_status["message"]
-
-    return {
-        "real_authorized": real_authorized,
-        "status": account_status["status"],
-        "message": account_status["message"]
-    }
-
+    raise HTTPException(
+        status_code=403,
+        detail="Comandos de conta desativados no modo de análise."
+    )
 
 @app.post("/api/v1/monitor/timeframe")
 def set_monitor_timeframe(data: Dict, request: Request):
@@ -384,6 +415,40 @@ def update_monitor(data: Dict, token: str = Depends(verify_subscriber)):
 def get_monitor_state(token: str = Depends(verify_subscriber)):
     return {**monitor_states[monitor_timeframe], "timeframe": monitor_timeframe}
 
+
+
+
+@app.get("/api/v1/hybrid-analysis")
+def read_hybrid_analysis(token: str = Depends(verify_subscriber)):
+    timeframe = monitor_timeframe
+    state = monitor_states[timeframe]
+
+    result = analyze_hybrid(
+        get_market_context(),
+        state.get("candles", []),
+        timeframe
+    )
+
+    result["monitor_updated_at"] = state.get("updated_at")
+    return result
+
+
+@app.get("/api/admin/hybrid-analysis")
+def admin_hybrid_analysis(request: Request):
+    if not validar_sessao(request):
+        raise HTTPException(status_code=401, detail="Login administrativo necessário.")
+
+    timeframe = monitor_timeframe
+    state = monitor_states[timeframe]
+
+    result = analyze_hybrid(
+        get_market_context(),
+        state.get("candles", []),
+        timeframe
+    )
+
+    result["monitor_updated_at"] = state.get("updated_at")
+    return result
 
 
 @app.get("/api/v1/monitor/public-state")
@@ -499,6 +564,9 @@ style="padding:13px;width:100%;border-radius:8px;background:#17263a;color:white;
 <div id="contaSelecionada" class="menor">Autorização REAL: BLOQUEADA</div>
 <div id="avisoConta" class="menor">Operações reais bloqueadas por segurança.</div>
 </div>
+
+
+
 <div class="grid">
 <div class="card">SINAL ATUAL<div class="valor" id="sinal">Aguardando dados</div></div>
 <div class="card">TAXA DE ACERTO<div class="valor" id="taxa">--</div></div>
@@ -514,6 +582,28 @@ style="padding:13px;width:100%;border-radius:8px;background:#17263a;color:white;
 <div class="card">
 <h3>Último sinal</h3>
 <div id="detalhe" class="menor">Aguardando sincronização do monitor.</div>
+</div>
+<div class="card" style="margin-top:15px">
+<h3>Inteligência híbrida EUR/USD</h3>
+<div class="menor" id="hybridStatus">Aguardando análise...</div>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:12px">
+ <div class="card"><strong>Contexto econômico</strong><div id="hybridContext">--</div></div>
+ <div class="card"><strong>Ação dos preços</strong><div id="hybridPrice">--</div></div>
+ <div class="card"><strong>Regime de mercado</strong><div id="hybridRegime">--</div></div>
+ <div class="card"><strong>Decisão</strong><div id="hybridDecision">AGUARDAR</div></div>
+</div>
+<h4>Métricas econômicas</h4>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px">
+ <div>Juros ECB: <span id="hmEcb">--</span></div>
+ <div>Juros FED: <span id="hmFed">--</span></div>
+ <div>Inflação zona do euro: <span id="hmEuroInflation">--</span></div>
+ <div>Desemprego zona do euro: <span id="hmEuroUnemployment">--</span></div>
+ <div>PIB zona do euro: <span id="hmEuroGdp">--</span></div>
+ <div>Inflação EUA: <span id="hmUsInflation">--</span></div>
+ <div>Desemprego EUA: <span id="hmUsUnemployment">--</span></div>
+ <div>PIB EUA: <span id="hmUsGdp">--</span></div>
+</div>
+<div class="menor" id="hybridDetails" style="margin-top:12px">Análise ainda não disponível.</div>
 </div>
 <div class="card">
 <h3 id="tituloGrafico">Gráfico EUR/USD · M1</h3>
@@ -658,6 +748,9 @@ function atualizarEstadoConta(trading) {
  const real = document.getElementById("realBtn");
 
  realAutorizado = trading?.real_authorized === true;
+
+
+
  label.textContent = "Autorização REAL: " + (realAutorizado ? "ATIVA" : "BLOQUEADA");
  practice.style.opacity = realAutorizado ? "0.55" : "1";
  real.style.opacity = realAutorizado ? "1" : "0.55";
@@ -765,8 +858,87 @@ async function atualizar(){
   document.getElementById('atualizacao').textContent='Erro ao atualizar: '+e.message;
  }
 }
+
+function hybridSet(id, value){
+ const el=document.getElementById(id);
+ if(el) el.textContent=value;
+}
+
+function hybridMetric(metric){
+ if(!metric) return "--";
+ const value=metric.value;
+ const formatted=value==null?"--":
+  (typeof value==="number"?value.toFixed(2):String(value))+
+  (metric.units?" "+metric.units:"");
+ const date=metric.observation_date||metric.effective_date||metric.published_at;
+ return formatted+(date?" · "+date:"");
+}
+
+let hybridBusy=false;
+
+async function atualizarAnaliseHibrida(){
+ if(hybridBusy) return;
+ hybridBusy=true;
+ try{
+  const r=await fetch("/api/admin/hybrid-analysis");
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  const d=await r.json();
+  const ctx=d.market_context||{};
+  const metrics=ctx.metrics||{};
+  const price=d.price_analysis||{};
+  const action=price.recent_price_action||{};
+  const candle=price.latest_candle||{};
+  const regime=price.market_regime||{};
+
+  hybridSet("hybridStatus",
+   "Status: "+(d.status||"DESCONHECIDO")+
+   " · Timeframe: "+(d.timeframe||"--")+
+   " · Velas fechadas: "+(d.closed_candles??price.candles_analyzed??0));
+
+  hybridSet("hybridContext",
+   (ctx.status||"INDISPONÍVEL")+" · Métricas válidas: "+
+   (ctx.valid_metrics??0)+"/"+(ctx.total_metrics??8));
+
+  hybridSet("hybridPrice",price.status==="OK"?
+   (action.direction||"INDEFINIDA")+" · Alta: "+(action.bullish_candles??0)+
+   " · Baixa: "+(action.bearish_candles??0)+
+   " · Neutras: "+(action.neutral_candles??0):
+   "Dados insuficientes");
+
+  hybridSet("hybridRegime",regime.regime||"INDEFINIDO");
+  hybridSet("hybridDecision",d.decision||"AGUARDAR");
+
+  hybridSet("hmEcb",hybridMetric(metrics.ecb_rate));
+  hybridSet("hmFed",hybridMetric(metrics.fed_rate));
+  hybridSet("hmEuroInflation",hybridMetric(metrics.eurozone_inflation));
+  hybridSet("hmEuroUnemployment",hybridMetric(metrics.eurozone_employment));
+  hybridSet("hmEuroGdp",hybridMetric(metrics.eurozone_gdp));
+  hybridSet("hmUsInflation",hybridMetric(metrics.united_states_inflation));
+  hybridSet("hmUsUnemployment",hybridMetric(metrics.united_states_employment));
+  hybridSet("hmUsGdp",hybridMetric(metrics.united_states_gdp));
+
+  const variation=Number(action.variation_10_candles);
+  const variationText=Number.isFinite(variation)?
+   "Variação das 10 velas: "+(variation*100).toFixed(4)+"%":"";
+  hybridSet("hybridDetails",
+   (price.status==="OK"?
+    "Última vela: "+(candle.type||"--")+
+    " · "+variationText+
+    " · Regime: "+(regime.reason||"Sem justificativa disponível."):
+    (d.reason||"Histórico insuficiente para análise de preços."))+
+   " · Notícias: "+(ctx.news_status||"INDISPONÍVEIS")+
+   " · Execução automática: "+(d.execution===false?"DESATIVADA":"NÃO AUTORIZADA"));
+ }catch(e){
+  hybridSet("hybridStatus","Falha na análise híbrida: "+e.message);
+ }finally{
+  hybridBusy=false;
+ }
+}
+
 atualizar();
+atualizarAnaliseHibrida();
 setInterval(atualizar,2000);
+setInterval(atualizarAnaliseHibrida,10000);
 </script>
 </body>
 </html>
