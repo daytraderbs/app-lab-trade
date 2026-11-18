@@ -377,6 +377,49 @@ monitor_states = {
     "15m": novo_monitor_state()
 }
 
+MONITOR_TIMEOUT_SECONDS = 15
+
+def monitor_esta_online(estado):
+    from datetime import datetime, timezone
+    try:
+        valor = estado.get("updated_at")
+        if not valor:
+            return False
+        atualizado = datetime.fromisoformat(
+            str(valor).replace("Z", "+00:00")
+        )
+        if atualizado.tzinfo is None:
+            atualizado = atualizado.replace(tzinfo=timezone.utc)
+        idade = (
+            datetime.now(timezone.utc) -
+            atualizado.astimezone(timezone.utc)
+        ).total_seconds()
+        return 0 <= idade <= MONITOR_TIMEOUT_SECONDS
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+def estado_monitor_seguro(estado):
+    online = monitor_esta_online(estado)
+    resultado = dict(estado)
+    resultado["monitor_online"] = online
+    if not online:
+        resultado.update({
+            "latest": {},
+            "history": [],
+            "candles": [],
+            "stats": {}
+        })
+    return resultado
+
+def resposta_monitor_standby(timeframe):
+    return {
+        "status": "MONITOR_OFFLINE",
+        "timeframe": timeframe,
+        "decision": "AGUARDAR",
+        "execution": False,
+        "reason": "STAND-BY: sem dados atuais da IQ Option."
+    }
+
 @app.post("/api/v1/monitor/update")
 def update_monitor(data: Dict, token: str = Depends(verify_subscriber)):
     from datetime import datetime, timezone
@@ -413,7 +456,10 @@ def update_monitor(data: Dict, token: str = Depends(verify_subscriber)):
 
 @app.get("/api/v1/monitor/state")
 def get_monitor_state(token: str = Depends(verify_subscriber)):
-    return {**monitor_states[monitor_timeframe], "timeframe": monitor_timeframe}
+    return {
+        **estado_monitor_seguro(monitor_states[monitor_timeframe]),
+        "timeframe": monitor_timeframe
+    }
 
 
 
@@ -422,6 +468,9 @@ def get_monitor_state(token: str = Depends(verify_subscriber)):
 def read_hybrid_analysis(token: str = Depends(verify_subscriber)):
     timeframe = monitor_timeframe
     state = monitor_states[timeframe]
+
+    if not monitor_esta_online(state):
+        return resposta_monitor_standby(timeframe)
 
     result = analyze_hybrid(
         get_market_context(),
@@ -441,6 +490,9 @@ def admin_hybrid_analysis(request: Request):
     timeframe = monitor_timeframe
     state = monitor_states[timeframe]
 
+    if not monitor_esta_online(state):
+        return resposta_monitor_standby(timeframe)
+
     result = analyze_hybrid(
         get_market_context(),
         state.get("candles", []),
@@ -455,7 +507,10 @@ def admin_hybrid_analysis(request: Request):
 def public_monitor_state(request: Request):
     if not validar_sessao(request):
         raise HTTPException(status_code=401, detail="Login administrativo necessário.")
-    estado = {**monitor_states[monitor_timeframe], "timeframe": monitor_timeframe}
+    estado = {
+        **estado_monitor_seguro(monitor_states[monitor_timeframe]),
+        "timeframe": monitor_timeframe
+    }
     estado["trading"] = {
         "real_authorized": real_authorized,
         "message": account_status["message"],
@@ -834,10 +889,26 @@ async function atualizar(){
   const nomeTF=tf==="15m"?"M15":"M1";
   document.getElementById("tituloMonitor").textContent="Monitor de mercado • EUR/USD • "+nomeTF;
   document.getElementById("tituloGrafico").textContent="Gráfico EUR/USD · "+nomeTF;
+  const online=d.monitor_online===true;
+  document.getElementById("conexao").textContent=online
+   ?"ONLINE":"DESLIGADO — SEM RECEBIMENTO DE DADOS";
+
+  if(!online){
+   document.getElementById('sinal').textContent='AGUARDAR';
+   ['taxa','avaliadas','resultado','rsi','macd','atr'].forEach(id=>{
+    document.getElementById(id).textContent='--';
+   });
+   document.getElementById('detalhe').textContent=
+    'Monitor em STAND-BY. Aguardando dados atuais da IQ Option.';
+   document.getElementById('historico').innerHTML=
+    '<tr><td colspan="5">Monitor desligado. Aguardando comunicação.</td></tr>';
+   desenharGrafico([]);
+   document.getElementById('atualizacao').textContent=
+    'STAND-BY — sem comunicação com o monitor.';
+   return;
+  }
+
   const x=d.latest||{},s=d.stats||{};
-  const ultima=d.updated_at?new Date(d.updated_at).getTime():0;
-  const online=ultima>0&&(Date.now()-ultima)<1200000;
-  document.getElementById("conexao").textContent=online?"ONLINE":"SEM COMUNICAÇÃO";
   document.getElementById('sinal').textContent=x.sinal||'AGUARDAR';
   document.getElementById('taxa').textContent=(s.taxa_acerto??0)+'%';
   document.getElementById('avaliadas').textContent=s.avaliadas??0;

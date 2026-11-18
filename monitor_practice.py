@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from iqoptionapi.stable_api import IQ_Option
 from iqoptionapi import stable_api
+from iqoptionapi.ws.chanels.changebalance import Changebalance
 from indicators import calculate_indicators
 from strategy import generate_signal
 
@@ -103,6 +104,21 @@ def conectar():
             print(f"Aviso ao encerrar conexão: {erro}")
 
         raise
+
+
+
+def reconectar(api):
+    print("Reconectando à IQ Option...")
+    status, mensagem = api.connect()
+
+    if not status:
+        raise ConnectionError(str(mensagem))
+
+    cliente_ws = api.api.websocket_client
+    cliente_ws.wss.on_data = observar_evento_conta
+
+    print("Reconexão estabelecida. Observador de conta reinstalado.")
+    return api
 
 
 def carregar_historico():
@@ -256,12 +272,29 @@ def consultar_comandos():
         tf = dados.get("timeframe")
         return {
             "timeframe": tf if tf in ("1m", "15m") else None,
-            "account_command": dados.get("account_command")
+            "account_command": dados.get("account_command"),
+            "manual_order": dados.get("manual_order"),
+            "real_authorized": dados.get("real_authorized", False),
+            "account_status": dados.get("account_status", {})
         }
     except requests.RequestException as erro:
         print(f"Falha ao consultar comandos: {erro}")
         return None
 
+
+
+def validar_autorizacao_ordem(comandos, ordem):
+    if not ordem:
+        return False
+
+    estado = comandos.get("account_status") or {}
+
+    return (
+        comandos.get("real_authorized") is True
+        and estado.get("status") == "CONFIRMADO"
+        and estado.get("confirmed") == "REAL"
+        and ordem.get("account") == "REAL"
+    )
 
 
 def comando_ainda_pendente(command_id):
@@ -277,13 +310,14 @@ def comando_ainda_pendente(command_id):
     )
 
 
-def enviar_resultado_comando(command_id, sucesso, account_id=None, account_type=None, mensagem=""):
+def enviar_resultado_comando(command_id, sucesso, account_id=None, account_type=None, mensagem="", balance=None):
     payload = {
         "command_id": command_id,
         "account": "REAL",
         "success": sucesso,
         "account_id": account_id,
         "account_type": account_type,
+        "balance": balance,
         "message": mensagem
     }
 
@@ -295,6 +329,81 @@ def enviar_resultado_comando(command_id, sucesso, account_id=None, account_type=
     )
     resposta.raise_for_status()
     return resposta.json()
+
+
+def enviar_resultado_ordem(command_id, sucesso, mensagem="", order_id=""):
+    payload = {
+        "command_id": command_id,
+        "success": sucesso,
+        "order_id": str(order_id or ""),
+        "message": mensagem
+    }
+
+    url = COMMAND_RESULT_URL.rsplit("/", 1)[0] + "/manual-order-result"
+
+    resposta = requests.post(
+        url,
+        json=payload,
+        headers={"X-Trader-Token": TOKEN_SEGURANCA},
+        timeout=10
+    )
+    resposta.raise_for_status()
+    return resposta.json()
+
+
+def executar_ordem_manual(api, ordem):
+    if not isinstance(ordem, dict):
+        raise ValueError("Ordem inválida.")
+
+    lado = ordem.get("side")
+    tipo = ordem.get("option_type")
+    ativo = ordem.get("active") or ATIVO
+
+    valor = float(ordem.get("amount", 0))
+    duracao = ordem.get("duration")
+
+    if lado not in ("COMPRA", "VENDA"):
+        raise ValueError("Direção inválida.")
+
+    if tipo not in ("binary", "digital"):
+        raise ValueError("Tipo de operação inválido.")
+
+    if not valor > 0 or not valor < float("inf"):
+        raise ValueError("Valor da operação inválido.")
+
+    if isinstance(duracao, bool) or not isinstance(duracao, int):
+        raise ValueError("Duração inválida.")
+
+    if not 1 <= duracao <= 60:
+        raise ValueError("Duração fora do limite permitido.")
+
+    if not api.check_connect():
+        raise RuntimeError("IQ Option desconectada. Ordem não enviada.")
+
+    direcao = "call" if lado == "COMPRA" else "put"
+
+    if tipo == "binary":
+        resultado = api.buy(valor, ativo, direcao, duracao)
+    else:
+        resultado = api.buy_digital_spot(
+            ativo, valor, direcao, duracao
+        )
+
+    if isinstance(resultado, tuple):
+        if len(resultado) >= 2 and isinstance(resultado[0], bool):
+            sucesso, identificador = resultado[0], resultado[1]
+        elif len(resultado) >= 2:
+            identificador, sucesso = resultado[0], resultado[1]
+        else:
+            sucesso, identificador = bool(resultado[0]), ""
+    else:
+        sucesso = bool(resultado)
+        identificador = ""
+
+    if not sucesso:
+        raise RuntimeError("IQ Option não confirmou a abertura da operação.")
+
+    return str(identificador or "")
 
 
 def processar_comando_conta(api, comando):
@@ -350,20 +459,10 @@ def processar_comando_conta(api, comando):
             evento_mudanca_conta.clear()
             solicitacao_em = time.monotonic()
 
-        # Usa a sessão autenticada da IQ Option, com tempo limite.
-        recurso = api.api.changebalance
-        url = api.api.prepare_http_url(recurso)
+        # Solicita a troca pelo canal WebSocket autenticado da IQ Option.
+        Changebalance(api.api)(real_id)
 
-        resposta = api.api.session.request(
-            method="POST",
-            url=url,
-            data={"balance_id": real_id},
-            proxies=api.api.proxies,
-            timeout=(5, 10)
-        )
-        resposta.raise_for_status()
-
-        # HTTP 200 não basta: exige evento novo da própria IQ Option.
+        # Exige evento novo de confirmação da própria IQ Option.
         if not evento_mudanca_conta.wait(timeout=12):
             raise RuntimeError(
                 "A IQ Option não confirmou a troca de conta no prazo esperado."
@@ -381,11 +480,8 @@ def processar_comando_conta(api, comando):
         if evento.get("type") != 1:
             raise RuntimeError("A IQ Option não confirmou o tipo REAL (1).")
 
-        if not comando_ainda_pendente(command_id):
-            print("Solicitação cancelada. Autorização REAL permanece bloqueada.")
-            return
-
-        # Atualiza as inscrições locais somente após confirmação do servidor.
+        # Atualiza as inscrições locais após confirmação do servidor,
+        # mesmo se o comando tiver sido cancelado durante a solicitação.
         id_anterior = stable_api.global_value.balance_id
 
         if id_anterior is not None and str(id_anterior) != str(real_id):
@@ -403,7 +499,8 @@ def processar_comando_conta(api, comando):
             True,
             real_id,
             1,
-            "IQ Option confirmou a conta REAL por evento balance-changed."
+            "IQ Option confirmou a conta REAL por evento balance-changed.",
+            float(evento["amount"])
         )
 
         print("Conta REAL confirmada pela IQ Option. Ordens continuam bloqueadas.")
@@ -425,7 +522,7 @@ def processar_comando_conta(api, comando):
 
 
 def enviar_estado_render(rows, candles):
-    if not TOKEN_SEGURANCA or not rows:
+    if not TOKEN_SEGURANCA:
         return
 
     finalizados = [
@@ -439,7 +536,7 @@ def enviar_estado_render(rows, candles):
     total = acertos + erros
 
     payload = {
-        "latest": rows[-1],
+        "latest": rows[-1] if rows else {},
         "history": rows[-300:],
         "candles": [formatar_candle(c) for c in candles[-205:]],
         "stats": {
@@ -478,6 +575,8 @@ def executar():
 
     primeiro_ciclo = not rows
     ultimo_timestamp = max(registrados, default=0)
+    falhas_candles = 0
+    retomada_pendente = bool(rows)
 
     print("Monitor de mercado iniciado — sem seleção de conta.")
     print("Ordens reais e operações automáticas: DESATIVADAS.")
@@ -492,6 +591,20 @@ def executar():
                     comandos.get("account_command")
                 )
 
+            ordem_manual = comandos.get("manual_order") if comandos else None
+            if ordem_manual:
+                command_id = ordem_manual.get("command_id")
+                mensagem = (
+                    "Ordem recusada: AI Trade Lab opera exclusivamente "
+                    "em modo de análise. Nenhuma ordem foi enviada."
+                )
+                print(mensagem)
+                if command_id:
+                    try:
+                        enviar_resultado_ordem(command_id, False, mensagem)
+                    except Exception as erro:
+                        print(f"Falha ao comunicar recusa da ordem: {erro}")
+
             solicitado = comandos.get("timeframe") if comandos else None
             if solicitado:
                 novo = 60 if solicitado == "1m" else 900
@@ -502,12 +615,53 @@ def executar():
                     registrados = {int(r["timestamp"]) for r in rows}
                     primeiro_ciclo = not rows
                     ultimo_timestamp = max(registrados, default=0)
+                    retomada_pendente = True
                     print(f"Timeframe alterado para {solicitado}: {ARQUIVO}")
-            agora = time.time()
+            if not api.check_connect():
+                print("Conexão perdida. STAND-BY. Reconectando...")
+                retomada_pendente = True
+                api = reconectar(api)
+                falhas_candles = 0
+                time.sleep(2)
+                continue
 
+            agora = time.time()
             candles = api.get_candles(
                 ATIVO, TIMEFRAME, CANDLES_COUNT, agora
             )
+
+            if candles is None:
+                retomada_pendente = True
+                falhas_candles += 1
+                print(f"Falha ao receber candles: {falhas_candles}/2")
+
+                if not api.check_connect() or falhas_candles >= 2:
+                    print("Falhas consecutivas. STAND-BY. Reconectando...")
+                    retomada_pendente = True
+                    api = reconectar(api)
+                    falhas_candles = 0
+                    time.sleep(2)
+                else:
+                    time.sleep(5)
+                continue
+
+            falhas_candles = 0
+
+            try:
+                ultimo_fechamento = max(
+                    float(c["to"]) for c in candles
+                )
+            except (TypeError, KeyError, ValueError):
+                print("Candles inválidos. STAND-BY.")
+                retomada_pendente = True
+                time.sleep(5)
+                continue
+
+            if ultimo_fechamento < time.time() - 15:
+                print("Dados atrasados. STAND-BY até sincronizar.")
+                retomada_pendente = True
+                time.sleep(5)
+                continue
 
             fechados = sorted(
                 [
@@ -518,13 +672,25 @@ def executar():
             )
 
             if len(fechados) < 200:
-                print("Aguardando histórico suficiente...")
+                retomada_pendente = True
+                print("STAND-BY: aguardando histórico suficiente...")
                 time.sleep(10)
                 continue
 
             alterado = atualizar_resultados(rows, fechados)
 
-            if primeiro_ciclo:
+            if retomada_pendente:
+                ultimo_timestamp = max(
+                    int(c["from"]) for c in fechados
+                )
+                primeiro_ciclo = False
+                retomada_pendente = False
+                indices = []
+                print(
+                    "Sincronização recuperada. "
+                    "Aguardando o próximo fechamento de vela."
+                )
+            elif primeiro_ciclo:
                 indices = [len(fechados) - 1]
                 primeiro_ciclo = False
             else:
@@ -608,8 +774,9 @@ def executar():
             break
 
         except Exception as erro:
-            print(f"Erro no monitor: {erro}")
-            time.sleep(15)
+            retomada_pendente = True
+            print(f"Erro no monitor. STAND-BY: {erro}")
+            time.sleep(5)
 
 
 if __name__ == "__main__":
