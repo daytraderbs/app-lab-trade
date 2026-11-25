@@ -369,7 +369,8 @@ def novo_monitor_state():
         "latest": None,
         "history": [],
         "candles": [],
-        "stats": {}
+        "stats": {},
+        "adaptive": {}
     }
 
 monitor_states = {
@@ -407,7 +408,8 @@ def estado_monitor_seguro(estado):
             "latest": {},
             "history": [],
             "candles": [],
-            "stats": {}
+            "stats": {},
+            "adaptive": {}
         })
     return resultado
 
@@ -439,12 +441,15 @@ def update_monitor(data: Dict, token: str = Depends(verify_subscriber)):
 
     if not isinstance(data.get("stats", {}), dict):
         raise HTTPException(status_code=400, detail="Estatísticas inválidas.")
+    if not isinstance(data.get("adaptive", {}), dict):
+        raise HTTPException(status_code=400, detail="Resumo adaptativo inválido.")
 
     estado = monitor_states[timeframe]
     estado["latest"] = data["latest"]
     estado["history"] = data.get("history", [])[-300:]
     estado["candles"] = data.get("candles", [])[-205:]
     estado["stats"] = data.get("stats", {})
+    estado["adaptive"] = data.get("adaptive", {})
     estado["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     return {
@@ -475,7 +480,10 @@ def read_hybrid_analysis(token: str = Depends(verify_subscriber)):
     result = analyze_hybrid(
         get_market_context(),
         state.get("candles", []),
-        timeframe
+        timeframe,
+        state.get("latest"),
+        state.get("history", []),
+        state.get("adaptive", {})
     )
 
     result["monitor_updated_at"] = state.get("updated_at")
@@ -496,7 +504,10 @@ def admin_hybrid_analysis(request: Request):
     result = analyze_hybrid(
         get_market_context(),
         state.get("candles", []),
-        timeframe
+        timeframe,
+        state.get("latest"),
+        state.get("history", []),
+        state.get("adaptive", {})
     )
 
     result["monitor_updated_at"] = state.get("updated_at")

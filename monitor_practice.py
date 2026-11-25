@@ -12,6 +12,8 @@ from iqoptionapi import stable_api
 from iqoptionapi.ws.chanels.changebalance import Changebalance
 from indicators import calculate_indicators
 from strategy import generate_signal
+from market_regime import classify_market
+from adaptive_engine import analyze_history
 
 IQ_USER = os.environ["IQ_USER"]
 IQ_PASS = os.environ["IQ_PASS"]
@@ -72,6 +74,7 @@ COLUNAS = [
     "macd_histogram",
     "atr_14",
     "distancia_ema9_atr",
+    "regime",
     "status",
     "resultado",
     "retorno_pct"
@@ -180,6 +183,23 @@ def analisar_candle(historico, indice):
         return None
 
     return indicadores, decisao
+
+
+def obter_regime(historico, indice):
+    try:
+        dados = [
+            formatar_candle(c)
+            for c in historico[:indice + 1]
+        ]
+        classificacao = classify_market(dados)
+
+        if isinstance(classificacao, dict):
+            return classificacao.get("regime", "INDEFINIDO")
+
+    except Exception as erro:
+        print(f"Aviso na classificação do regime: {erro}")
+
+    return "INDEFINIDO"
 
 
 def atualizar_resultados(rows, candles):
@@ -538,6 +558,7 @@ def enviar_estado_render(rows, candles):
     payload = {
         "latest": rows[-1] if rows else {},
         "history": rows[-300:],
+        "adaptive": analyze_history(rows),
         "candles": [formatar_candle(c) for c in candles[-205:]],
         "stats": {
             "avaliadas": len(finalizados),
@@ -677,28 +698,48 @@ def executar():
                 time.sleep(10)
                 continue
 
-            alterado = atualizar_resultados(rows, fechados)
+            alterado = False
 
             if retomada_pendente:
+                for row in rows:
+                    if row.get("status") == "PENDENTE":
+                        row["status"] = "EXPIRADO"
+                        row["resultado"] = "EXPIRADO"
+                        row["retorno_pct"] = ""
+                        alterado = True
+
                 ultimo_timestamp = max(
                     int(c["from"]) for c in fechados
                 )
+
+                for row in list(rows):
+                    if (
+                        int(row.get("timestamp", 0)) == ultimo_timestamp
+                        and row.get("status") != "FINALIZADO"
+                    ):
+                        rows.remove(row)
+                        registrados.discard(ultimo_timestamp)
+                        alterado = True
+
                 primeiro_ciclo = False
                 retomada_pendente = False
-                indices = []
-                print(
-                    "Sincronização recuperada. "
-                    "Aguardando o próximo fechamento de vela."
-                )
-            elif primeiro_ciclo:
                 indices = [len(fechados) - 1]
-                primeiro_ciclo = False
+                print(
+                    "Retomada sincronizada com a IQ Option. "
+                    "Analisando a última vela fechada e as 10 anteriores."
+                )
             else:
-                indices = [
-                    i for i, c in enumerate(fechados)
-                    if int(c["from"]) not in registrados
-                    and int(c["from"]) > ultimo_timestamp
-                ]
+                alterado = atualizar_resultados(rows, fechados)
+
+                if primeiro_ciclo:
+                    indices = [len(fechados) - 1]
+                    primeiro_ciclo = False
+                else:
+                    indices = [
+                        i for i, c in enumerate(fechados)
+                        if int(c["from"]) not in registrados
+                        and int(c["from"]) > ultimo_timestamp
+                    ]
 
             for i in indices:
                 candle = fechados[i]
@@ -732,6 +773,7 @@ def executar():
                     "distancia_ema9_atr": decisao[
                         "distance_from_ema9_atr"
                     ],
+                    "regime": obter_regime(fechados, i),
                     "status": (
                         "PENDENTE" if sinal in ("COMPRA", "VENDA")
                         else "SEM_OPERACAO"

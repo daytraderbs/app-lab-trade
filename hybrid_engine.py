@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from price_analysis import analyze_recent_price
+from adaptive_engine import evaluate_decision
 
 
 def _timestamp_epoch(value):
@@ -31,7 +32,14 @@ def _metric_summary(metric):
     }
 
 
-def analyze_hybrid(market_context, candles, timeframe="1m"):
+def analyze_hybrid(
+    market_context,
+    candles,
+    timeframe="1m",
+    monitor_latest=None,
+    adaptive_rows=None,
+    adaptive_summary=None
+):
     if timeframe not in ("1m", "15m"):
         raise ValueError("Timeframe deve ser 1m ou 15m.")
 
@@ -96,8 +104,21 @@ def analyze_hybrid(market_context, candles, timeframe="1m"):
     }
 
     if len(closed_candles) < 30:
+        sinal_base = (
+            monitor_latest.get("sinal")
+            if isinstance(monitor_latest, dict)
+            else None
+        )
+        adaptativo = evaluate_decision(
+            adaptive_rows or [],
+            "INDEFINIDO",
+            sinal_base,
+            adaptive_summary
+        )
+
         return {
             "status": "INSUFFICIENT_DATA",
+            "adaptive_analysis": adaptativo,
             "timeframe": timeframe,
             "closed_candles": len(closed_candles),
             "market_context": context_summary,
@@ -108,6 +129,26 @@ def analyze_hybrid(market_context, candles, timeframe="1m"):
 
     price = analyze_recent_price(closed_candles)
 
+    regime_info = price.get("market_regime", {})
+    regime = (
+        regime_info.get("regime", "INDEFINIDO")
+        if isinstance(regime_info, dict)
+        else "INDEFINIDO"
+    )
+
+    sinal_base = (
+        monitor_latest.get("sinal")
+        if isinstance(monitor_latest, dict)
+        else None
+    )
+
+    adaptativo = evaluate_decision(
+        adaptive_rows or [],
+        regime,
+        sinal_base,
+        adaptive_summary
+    )
+
     return {
         "status": "OK",
         "asset": "EUR/USD",
@@ -117,6 +158,7 @@ def analyze_hybrid(market_context, candles, timeframe="1m"):
         ).isoformat(),
         "market_context": context_summary,
         "price_analysis": price,
+        "adaptive_analysis": adaptativo,
         "integration": {
             "macro_direction": "NOT_ESTABLISHED",
             "reason": (
@@ -124,10 +166,13 @@ def analyze_hybrid(market_context, candles, timeframe="1m"):
                 "interpretação direcional validada."
             )
         },
-        "decision": "AGUARDAR",
+        "decision": adaptativo["decisao"],
         "decision_reasons": [
-            "Motor estatístico híbrido ainda não validado.",
-            "Contexto macroeconômico sem direção confirmada.",
+            "Sinal-base recebido do monitor: "
+            + str(sinal_base or "AUSENTE"),
+            "Influência adaptativa: "
+            + adaptativo["influencia"],
+            adaptativo["motivo"],
             "Nenhuma ordem é executada automaticamente."
         ],
         "execution": False
