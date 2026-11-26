@@ -663,6 +663,7 @@ style="padding:13px;width:100%;border-radius:8px;background:#17263a;color:white;
   <div class="menor" id="adaptiveSamples">Amostras: --</div>
   <div class="menor" id="adaptiveReturn">Retorno médio: --</div>
   <div class="menor" id="adaptiveReason">--</div>
+  <div class="menor" id="adaptiveDirections" style="margin-top:10px">Comparação COMPRA/VENDA: aguardando dados.</div>
  </div>
 </div>
 <h4>Métricas econômicas</h4>
@@ -1015,6 +1016,19 @@ async function atualizarAnaliseHibrida(){
    "Retorno médio: --");
   hybridSet("adaptiveReason",dadosAtivos?
    (adaptive.motivo||"Sem justificativa disponível."):"Aguardando dados válidos do monitor.");
+
+  const comparacao=adaptive.comparacao_direcoes||{};
+  function resumoDirecao(nome,item){
+   if(!item) return nome+": evidência insuficiente.";
+   return nome+": "+Number(item.probabilidade_estimada_pct).toFixed(2)+
+    "% estimada · "+item.amostras_semelhantes+" padrões · retorno médio "+
+    Number(item.retorno_medio_pct).toFixed(6)+"% · regime "+
+    (item.regime_correspondente?"correspondente":"não correspondente");
+  }
+  hybridSet("adaptiveDirections",
+   "COMPARAÇÃO HISTÓRICA (não é garantia de resultado) · "+
+   resumoDirecao("COMPRA",comparacao.compra)+" | "+
+   resumoDirecao("VENDA",comparacao.venda));
 
   hybridSet("hmEcb",hybridMetric(metrics.ecb_rate));
   hybridSet("hmFed",hybridMetric(metrics.fed_rate));

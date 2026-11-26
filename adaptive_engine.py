@@ -235,3 +235,27 @@ def evaluate_decision(
         resultado["motivo"] = "Evidência histórica inconclusiva."
 
     return resultado
+
+
+def avaliar_duas_direcoes(rows, regime, current_features):
+    atuais = extrair_features(current_features or {})
+    if atuais is None:
+        return {
+            "status": "SEM_DADOS",
+            "motivo": "Indicadores atuais incompletos.",
+            "compra": None,
+            "venda": None,
+        }
+
+    saida = {}
+    for sinal in ("COMPRA", "VENDA"):
+        saida[sinal.lower()] = avaliar_padroes(
+            rows, regime, sinal, atuais
+        )
+
+    return {
+        "status": "ATIVA" if any(saida.values()) else "SEM_EVIDENCIA",
+        "motivo": "Comparação histórica independente por direção.",
+        "compra": saida["compra"],
+        "venda": saida["venda"],
+    }

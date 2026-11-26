@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from price_analysis import analyze_recent_price
-from adaptive_engine import evaluate_decision
+from adaptive_engine import evaluate_decision, avaliar_duas_direcoes
 
 
 def _timestamp_epoch(value):
@@ -116,6 +116,9 @@ def analyze_hybrid(
             adaptive_summary,
             monitor_latest
         )
+        adaptativo["comparacao_direcoes"] = avaliar_duas_direcoes(
+            adaptive_rows or [], "INDEFINIDO", monitor_latest
+        )
 
         return {
             "status": "INSUFFICIENT_DATA",
@@ -149,6 +152,9 @@ def analyze_hybrid(
         sinal_base,
         adaptive_summary,
         monitor_latest
+    )
+    adaptativo["comparacao_direcoes"] = avaliar_duas_direcoes(
+        adaptive_rows or [], regime, monitor_latest
     )
 
     return {
