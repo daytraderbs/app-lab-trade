@@ -657,6 +657,13 @@ style="padding:13px;width:100%;border-radius:8px;background:#17263a;color:white;
  <div class="card"><strong>Ação dos preços</strong><div id="hybridPrice">--</div></div>
  <div class="card"><strong>Regime de mercado</strong><div id="hybridRegime">--</div></div>
  <div class="card"><strong>Decisão</strong><div id="hybridDecision">AGUARDAR</div></div>
+ <div class="card"><strong>IA Adaptativa</strong>
+  <div id="adaptiveInfluence">Aguardando dados...</div>
+  <div class="menor" id="adaptiveProbability">Probabilidade: --</div>
+  <div class="menor" id="adaptiveSamples">Amostras: --</div>
+  <div class="menor" id="adaptiveReturn">Retorno médio: --</div>
+  <div class="menor" id="adaptiveReason">--</div>
+ </div>
 </div>
 <h4>Métricas econômicas</h4>
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px">
@@ -971,6 +978,7 @@ async function atualizarAnaliseHibrida(){
   const action=price.recent_price_action||{};
   const candle=price.latest_candle||{};
   const regime=price.market_regime||{};
+  const adaptive=d.adaptive_analysis||{};
 
   hybridSet("hybridStatus",
    "Status: "+(d.status||"DESCONHECIDO")+
@@ -989,6 +997,24 @@ async function atualizarAnaliseHibrida(){
 
   hybridSet("hybridRegime",regime.regime||"INDEFINIDO");
   hybridSet("hybridDecision",d.decision||"AGUARDAR");
+
+  const prob=adaptive.probabilidade_estimada_pct;
+  const retorno=adaptive.retorno_medio_pct;
+  const amostras=adaptive.amostras;
+  const dadosAtivos=d.status==="OK" && adaptive.status==="ATIVA";
+
+  hybridSet("adaptiveInfluence",dadosAtivos?
+   (adaptive.influencia||"SEM EVIDÊNCIA"):"SEM DADOS");
+  hybridSet("adaptiveProbability",dadosAtivos && prob!=null?
+   "Probabilidade estimada: "+Number(prob).toFixed(2)+"%":
+   "Probabilidade estimada: --");
+  hybridSet("adaptiveSamples",dadosAtivos && amostras!=null?
+   "Padrões semelhantes: "+amostras:"Padrões semelhantes: --");
+  hybridSet("adaptiveReturn",dadosAtivos && retorno!=null?
+   "Retorno médio: "+Number(retorno).toFixed(6)+"%":
+   "Retorno médio: --");
+  hybridSet("adaptiveReason",dadosAtivos?
+   (adaptive.motivo||"Sem justificativa disponível."):"Aguardando dados válidos do monitor.");
 
   hybridSet("hmEcb",hybridMetric(metrics.ecb_rate));
   hybridSet("hmFed",hybridMetric(metrics.fed_rate));
