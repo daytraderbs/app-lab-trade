@@ -113,7 +113,8 @@ def analyze_hybrid(
             adaptive_rows or [],
             "INDEFINIDO",
             sinal_base,
-            adaptive_summary
+            adaptive_summary,
+            monitor_latest
         )
 
         return {
@@ -146,7 +147,8 @@ def analyze_hybrid(
         adaptive_rows or [],
         regime,
         sinal_base,
-        adaptive_summary
+        adaptive_summary,
+        monitor_latest
     )
 
     return {
