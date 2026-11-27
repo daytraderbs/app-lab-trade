@@ -196,44 +196,67 @@ def evaluate_decision(
         "execucao_automatica": False,
     }
 
-    if sinal_base not in ("COMPRA", "VENDA"):
-        resultado["motivo"] = "Sem sinal direcional para avaliar."
-        return resultado
-
     atuais = extrair_features(current_features or {})
     if atuais is None:
         resultado["motivo"] = "Indicadores atuais incompletos."
         return resultado
 
-    padrao = avaliar_padroes(rows, regime, sinal_base, atuais)
-    if padrao is None:
+    direcoes = (
+        [sinal_base]
+        if sinal_base in ("COMPRA", "VENDA")
+        else ["COMPRA", "VENDA"]
+    )
+
+    avaliadas = []
+
+    for direcao in direcoes:
+        padrao = avaliar_padroes(rows, regime, direcao, atuais)
+        if padrao is not None:
+            avaliadas.append((direcao, padrao))
+
+    if not avaliadas:
         resultado["motivo"] = (
-            "Histórico semelhante insuficiente para uma recomendação."
+            "Histórico semelhante insuficiente para avaliar as direções."
         )
         return resultado
 
-    prob = padrao["probabilidade_estimada_pct"]
-    retorno = padrao["retorno_medio_pct"]
+    melhor_direcao, melhor_padrao = max(
+        avaliadas,
+        key=lambda item: (
+            item[1]["probabilidade_estimada_pct"],
+            item[1]["retorno_medio_pct"]
+        )
+    )
+
+    prob = melhor_padrao["probabilidade_estimada_pct"]
+    retorno = melhor_padrao["retorno_medio_pct"]
 
     resultado.update({
-        "amostras": padrao["amostras_semelhantes"],
+        "amostras": melhor_padrao["amostras_semelhantes"],
         "probabilidade_estimada_pct": prob,
         "taxa_acerto": prob,
         "retorno_medio_pct": retorno,
-        "distancia_media": padrao["distancia_media"],
-        "regime_correspondente": padrao["regime_correspondente"],
+        "distancia_media": melhor_padrao["distancia_media"],
+        "regime_correspondente": melhor_padrao["regime_correspondente"],
+        "direcao_avaliada": melhor_direcao,
     })
 
     if prob >= 55 and retorno > 0:
-        resultado["decisao"] = sinal_base
+        resultado["decisao"] = melhor_direcao
         resultado["influencia"] = "APOIO_PREDITIVO"
-        resultado["motivo"] = "Padrões semelhantes historicamente favoráveis."
+        resultado["motivo"] = (
+            "Direção selecionada por padrões históricos semelhantes "
+            "com probabilidade mínima e retorno médio positivo."
+        )
     elif prob < 45 or retorno < 0:
         resultado["influencia"] = "BLOQUEIO_PREDITIVO"
-        resultado["motivo"] = "Padrões semelhantes historicamente desfavoráveis."
+        resultado["motivo"] = (
+            "Padrões semelhantes historicamente desfavoráveis."
+        )
     else:
         resultado["motivo"] = "Evidência histórica inconclusiva."
 
+    resultado["execucao_automatica"] = False
     return resultado
 
 
